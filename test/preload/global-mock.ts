@@ -2,7 +2,7 @@ import { afterEach, beforeEach, vi } from 'bun:test'
 
 const originalEnv = { ...process.env }
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers()
 })
 

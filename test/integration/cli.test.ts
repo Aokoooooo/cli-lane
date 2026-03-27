@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 
 test('cli prints help output', () => {
   const result = Bun.spawnSync(
-    [process.execPath, 'run', 'src/cli.ts', '--help'],
+    [process.execPath, 'run', 'src/index.ts', '--help'],
     {
       stdout: 'pipe',
       stderr: 'pipe',
@@ -15,7 +15,7 @@ test('cli prints help output', () => {
 
 test('cli fails on unsupported arguments', () => {
   const result = Bun.spawnSync(
-    [process.execPath, 'run', 'src/cli.ts', 'unknown'],
+    [process.execPath, 'run', 'src/index.ts', 'unknown'],
     {
       stdout: 'pipe',
       stderr: 'pipe',

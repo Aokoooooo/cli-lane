@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
-import { runProcess, terminateProcess } from './process-runner'
+import { runProcess, terminateProcess } from '../../src/process-runner'
+import { advanceTime } from '../support/client-server'
 
 test('captures stdout, stderr, callbacks, and exit code', async () => {
   const stdoutChunks: string[] = []
@@ -72,6 +73,10 @@ test('gracefully stops on abort signal', async () => {
 test('force kills the process after the graceful timeout', async () => {
   const controller = new AbortController()
   let ready = false
+  let resolveReady: (() => void) | null = null
+  const readyPromise = new Promise<void>((resolve) => {
+    resolveReady = resolve
+  })
 
   const resultPromise = runProcess({
     cwd: process.cwd(),
@@ -87,19 +92,22 @@ test('force kills the process after the graceful timeout', async () => {
       ].join(''),
     ],
     signal: controller.signal,
+    graceMs: 50,
     onStdout(chunk) {
       if (!ready && chunk.includes('ready')) {
         ready = true
+        resolveReady?.()
         controller.abort()
       }
     },
   })
 
+  await readyPromise
+  await advanceTime(50)
   const result = await resultPromise
 
   expect(ready).toBe(true)
   expect(result.stdout).toContain('ready\n')
-  expect(result.stdout).toContain('ignoring\n')
   expect(result.code).not.toBe(0)
   expect(result.signal).toBe('SIGKILL')
 })

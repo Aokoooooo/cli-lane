@@ -1,18 +1,20 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { createClient } from './client'
+import { createClient } from '../../src/client'
 import {
+  advanceTime,
   connectToServer,
   createMessageCollector,
   createTempDir,
   nextMessageWithin,
+  settleWithTimers,
+  waitForCondition,
   waitForCollectedMessage,
   waitForMessage,
-} from './client-server.test-support'
-import { encodeMessage, protocolVersion } from './protocol'
-import { readRegistration } from './registry'
-import { startServer } from './server'
-import { sleep } from './timing'
+} from '../support/client-server'
+import { encodeMessage, protocolVersion } from '../../src/protocol'
+import { readRegistration } from '../../src/registry'
+import { startServer } from '../../src/server'
 
 test('starts the coordinator server and writes registration', async () => {
   const runtimeDir = await createTempDir()
@@ -540,7 +542,10 @@ test('shuts itself down after the idle timeout and cleans registration', async (
     server.registration,
   )
 
-  await sleep(150)
+  await advanceTime(150)
+  await waitForCondition(async () => {
+    return (await readRegistration(server.registrationPath)) === null
+  })
 
   expect(await readRegistration(server.registrationPath)).toBeNull()
   await expect(connectToServer(server.port)).rejects.toThrow()
@@ -730,6 +735,7 @@ test('missed heartbeats detach the attached subscriber and auto-cancel the task'
       sentAt: 1,
       serverTime: expect.any(Number),
     })
+    await advanceTime(100)
 
     expect(
       await waitForMessage(
@@ -790,7 +796,7 @@ test('disconnecting during run normalization does not leave a zombie subscriber'
     })
     await nextMessageWithin(inspector)
 
-    await sleep(50)
+    await advanceTime(50)
 
     inspector.send({ type: 'ps', requestId: 'ps-zombie' })
     expect(await nextMessageWithin(inspector)).toEqual({
@@ -815,8 +821,10 @@ test('unauthenticated connections time out and do not block idle shutdown', asyn
 
   const session = await connectToServer(server.port)
 
-  await expect(session.closed).resolves.toBeUndefined()
-  await sleep(100)
+  const closedPromise = session.closed
+  await advanceTime(1_100)
+  await expect(closedPromise).resolves.toBeUndefined()
+  await advanceTime(100)
 
   expect(await readRegistration(server.registrationPath)).toBeNull()
   await expect(connectToServer(server.port)).rejects.toThrow()
@@ -831,7 +839,7 @@ test('createClient can bootstrap a coordinator and keep it alive with heartbeats
   })
 
   try {
-    await sleep(120)
+    await advanceTime(120)
 
     const ps = await client.ps()
     expect(ps).toEqual({
@@ -840,7 +848,7 @@ test('createClient can bootstrap a coordinator and keep it alive with heartbeats
       tasks: [],
     })
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
   }
 })
 
@@ -960,7 +968,7 @@ test('createClient can run commands and detach subscriptions explicitly', async 
       },
     })
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
     await server.stop()
   }
 })
@@ -1013,7 +1021,7 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
       taskStillRunning: true,
     })
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
     await server.stop()
   }
 })
@@ -1060,7 +1068,7 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
       requestedCwd: alternateCwd,
     })
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
     await server.stop()
   }
 })
@@ -1105,7 +1113,7 @@ test('createClient surfaces a notice when a task is queued', async () => {
       position: 2,
     })
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
     await server.stop()
   }
 })
@@ -1147,12 +1155,21 @@ test('createClient cleans up socket and bootstrap server on handshake failure', 
     },
     end() {
       socketCalls.end += 1
+      queueMicrotask(() => {
+        connectionOptions?.socket.close?.()
+      })
     },
     close() {
       socketCalls.close += 1
+      queueMicrotask(() => {
+        connectionOptions?.socket.close?.()
+      })
     },
     destroy() {
       socketCalls.destroy += 1
+      queueMicrotask(() => {
+        connectionOptions?.socket.close?.()
+      })
     },
   } as never
 

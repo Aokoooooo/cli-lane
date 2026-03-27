@@ -1,10 +1,10 @@
-import { afterEach } from 'bun:test'
+import { afterEach, vi } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { decodeMessageChunk, encodeMessage } from './protocol'
-import { withTimeout } from './timing'
+import { decodeMessageChunk, encodeMessage } from '../../src/protocol'
+import { withTimeout } from '../../src/timing'
 
 const tempDirs: string[] = []
 
@@ -72,6 +72,36 @@ export async function waitForCollectedMessage(
     if (predicate(message)) {
       return message
     }
+  }
+
+  throw new Error(`timed out after ${timeoutMs}ms`)
+}
+
+export async function advanceTime(ms: number): Promise<void> {
+  vi.advanceTimersByTime(ms)
+  await Promise.resolve()
+}
+
+export async function settleWithTimers<T>(
+  promise: Promise<T>,
+  advanceMs = 100,
+): Promise<T> {
+  await advanceTime(advanceMs)
+  return await promise
+}
+
+export async function waitForCondition(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = performance.now() + timeoutMs
+
+  while (performance.now() < deadline) {
+    if (await condition()) {
+      return
+    }
+
+    await Promise.resolve()
   }
 
   throw new Error(`timed out after ${timeoutMs}ms`)

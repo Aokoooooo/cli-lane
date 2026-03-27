@@ -1,14 +1,15 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { runCli } from './cli'
-import { createClient } from './client'
+import { runCli } from '../../src/cli'
+import { createClient } from '../../src/client'
 import {
   createCapturedWriter,
   createMessageCollector,
   createTempDir,
+  settleWithTimers,
   waitForCollectedMessage,
-} from './client-server.test-support'
-import { loadConfig } from './config'
+} from '../support/client-server'
+import { loadConfig } from '../../src/config'
 
 test('config defaults runtime directory and merge modes', () => {
   const config = loadConfig({}, '/workspace')
@@ -102,10 +103,10 @@ test('cli ps prints concise task summaries', async () => {
       expect(stdout.toString()).toContain('running')
       expect(stderr.toString()).toBe('')
     } finally {
-      await streamingClient.close()
+      await settleWithTimers(streamingClient.close())
     }
   } finally {
-    await bootstrapClient.close()
+    await settleWithTimers(bootstrapClient.close())
   }
 })
 
@@ -172,7 +173,7 @@ test('cli cancel requests cancellation for a task', async () => {
         (message as { taskId?: string }).taskId === accepted.taskId,
     )
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
   }
 })
 
@@ -218,7 +219,7 @@ test('cli run surfaces a cwd mismatch notice for global merges', async () => {
     expect(exitCode).toBe(0)
     expect(stderr.toString()).toContain('your requested cwd was')
   } finally {
-    await client.close()
+    await settleWithTimers(client.close())
   }
 })
 

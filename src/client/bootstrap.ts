@@ -113,7 +113,7 @@ async function connectToRegistration(
 async function startCoordinatorInHelperProcess(
   runtimeDir: string,
 ): Promise<CoordinatorServer> {
-  const helperScript = join(process.cwd(), 'src', 'cli.ts')
+  const helperScript = join(process.cwd(), 'src', 'index.ts')
   const child = Bun.spawn(
     ['bun', 'run', helperScript, '__server__', runtimeDir],
     {

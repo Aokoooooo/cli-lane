@@ -1,26 +1,26 @@
 import { randomUUID } from 'node:crypto'
-import { connectOrBootstrap } from './client/bootstrap'
+import { connectOrBootstrap } from './bootstrap'
 import type {
   AcceptedMessage,
   ClientToServer,
   PsResultMessage,
   ServerToClient,
   SubscriptionDetachedMessage,
-} from './protocol'
-import { startServer } from './server'
+} from '../protocol'
+import { startServer } from '../server'
 
-export type { ClientNotice } from './client/notices'
+export type { ClientNotice } from './notices'
 
 import {
   clearHeartbeatTimer,
   closeClient,
   sendMessage,
   waitForMessage,
-} from './client/socket'
+} from './socket'
 
-export type { Client, ClientOptions } from './client/types'
+export type { Client, ClientOptions } from './types'
 
-import type { Client, ClientOptions, ConnectionState } from './client/types'
+import type { Client, ClientOptions, ConnectionState } from './types'
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000
 const DEFAULT_BOOTSTRAP_IF_MISSING = true

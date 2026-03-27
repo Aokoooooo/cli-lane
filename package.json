@@ -4,9 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run src/cli.ts",
+    "dev": "bun run src/index.ts",
     "test": "bun test",
-    "build": "bun build --compile src/cli.ts --outfile ./cli-lane",
+    "build": "bun build --compile src/index.ts --outfile ./dist/cli-lane",
     "lint": "biome lint .",
     "format": "biome check . --write",
     "type-check": "tsc --noEmit"

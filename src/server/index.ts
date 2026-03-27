@@ -1,21 +1,21 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { OutputBuffer } from './output-buffer'
-import { normalizeCwd } from './path-utils'
-import { runProcess } from './process-runner'
+import { OutputBuffer } from '../output-buffer'
+import { normalizeCwd } from '../path-utils'
+import { runProcess } from '../process-runner'
 import {
   decodeMessageChunk,
   protocolVersion,
   type RunMessage,
-} from './protocol'
+} from '../protocol'
 import {
   acquireStartupLock,
   type Registration,
   removeRegistration,
   writeRegistration,
-} from './registry'
-import { Scheduler, type SchedulerTask } from './scheduler'
+} from '../registry'
+import { Scheduler, type SchedulerTask } from '../scheduler'
 import {
   addTaskSession,
   appendOutput,
@@ -29,18 +29,18 @@ import {
   replayBufferedOutput,
   send,
   sendTaskEvent,
-} from './server/output'
-import type { ServerRuntime, Session, TaskRuntimeState } from './server/types'
+} from './output'
+import type { ServerRuntime, Session, TaskRuntimeState } from './types'
 import {
   TaskManager,
   type TaskMergeMode,
   type TaskSnapshot,
-} from './task-manager'
+} from '../task-manager'
 import {
   normalizeMergeMode,
   normalizeSerialMode,
   resolveSerialKey,
-} from './task-routing'
+} from '../task-routing'
 
 export type StartServerOptions = {
   runtimeDir: string
