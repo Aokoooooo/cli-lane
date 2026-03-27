@@ -3,6 +3,7 @@ import { createConnection, Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createClient } from "../src/client";
 import { runProcess, terminateProcess } from "../src/process-runner";
 import { decodeMessageChunk, encodeMessage, protocolVersion } from "../src/protocol";
 import { readRegistration } from "../src/registry";
@@ -26,6 +27,11 @@ type ServerSession = {
   nextMessage: () => Promise<unknown>;
   close: () => Promise<void>;
   closed: Promise<void>;
+};
+
+type MessageCollector = {
+  push: (message: unknown) => void;
+  nextMessage: () => Promise<unknown>;
 };
 
 async function nextMessageWithin(session: ServerSession, timeoutMs = 1_000): Promise<unknown> {
@@ -52,6 +58,55 @@ async function waitForMessage(
   }
 
   throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
+async function waitForCollectedMessage(
+  collector: MessageCollector,
+  predicate: (message: unknown) => boolean,
+  timeoutMs = 1_500,
+): Promise<unknown> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const message = await Promise.race([
+      collector.nextMessage(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+
+    if (predicate(message)) {
+      return message;
+    }
+  }
+
+  throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
+function createMessageCollector(): MessageCollector {
+  const queue: unknown[] = [];
+  const waiters: Array<(message: unknown) => void> = [];
+
+  return {
+    push(message) {
+      const next = waiters.shift();
+      if (next) {
+        next(message);
+      } else {
+        queue.push(message);
+      }
+    },
+    nextMessage() {
+      const queued = queue.shift();
+      if (queued !== undefined) {
+        return Promise.resolve(queued);
+      }
+
+      return new Promise<unknown>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+  };
 }
 
 async function connectToServer(port: number): Promise<ServerSession> {
@@ -1098,4 +1153,147 @@ test("unauthenticated connections time out and do not block idle shutdown", asyn
   expect(await readRegistration(server.registrationPath)).toBeNull();
   await expect(connectToServer(server.port)).rejects.toThrow();
   await server.stop();
+});
+
+test("createClient can bootstrap a coordinator and keep it alive with heartbeats", async () => {
+  const runtimeDir = await createTempDir();
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const ps = await client.ps();
+    expect(ps).toEqual({
+      type: "ps-result",
+      requestId: expect.any(String),
+      tasks: [],
+    });
+  } finally {
+    await client.close();
+  }
+});
+
+test("createClient can run commands and detach subscriptions explicitly", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  });
+
+  const collector = createMessageCollector();
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onMessage(message) {
+      collector.push(message);
+    },
+  });
+
+  try {
+    const accepted = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        [
+          "process.stdout.write('hello\\n');",
+          "setInterval(() => {}, 1000);",
+        ].join(""),
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    expect(accepted).toEqual({
+      type: "accepted",
+      requestId: expect.any(String),
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+    });
+
+    expect(
+      await waitForCollectedMessage(
+        collector,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "task-event" &&
+          (message as { event?: { type?: string } }).event?.type === "stdout",
+      ),
+    ).toEqual({
+      type: "task-event",
+      taskId: accepted.taskId,
+      event: {
+        type: "stdout",
+        data: "hello\n",
+        seq: 1,
+        ts: expect.any(Number),
+        bytes: 6,
+        replay: false,
+      },
+    });
+
+    const detachedPromise = waitForCollectedMessage(
+      collector,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "subscription-detached" &&
+        (message as { taskId?: string }).taskId === accepted.taskId,
+    );
+
+    const detached = await client.cancelSubscription(accepted.taskId, accepted.subscriberId);
+    expect(detached).toEqual({
+      type: "subscription-detached",
+      taskId: accepted.taskId,
+      subscriberId: accepted.subscriberId,
+      remainingSubscribers: 0,
+      taskStillRunning: false,
+    });
+    expect(await detachedPromise).toEqual(detached);
+
+    const cancelAccepted = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setInterval(() => {}, 1000);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const cancelledPromise = waitForCollectedMessage(
+      collector,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string } }).event === "object" &&
+        (message as { event: { type?: string } }).event.type === "cancelled" &&
+        (message as { taskId?: string }).taskId === cancelAccepted.taskId,
+    );
+
+    await client.cancelTask(cancelAccepted.taskId);
+    expect(await cancelledPromise).toEqual({
+      type: "task-event",
+      taskId: cancelAccepted.taskId,
+      event: {
+        type: "cancelled",
+      },
+    });
+  } finally {
+    await client.close();
+    await server.stop();
+  }
 });
