@@ -6,3 +6,6 @@ if (args.includes("--help") || args.length === 0) {
   console.log("cli-lane");
   process.exit(0);
 }
+
+console.error("Unsupported arguments");
+process.exit(1);
