@@ -20,6 +20,7 @@ export type ClientOptions = {
   heartbeatIntervalMs?: number;
   bootstrapIfMissing?: boolean;
   onMessage?: (message: ServerToClient) => void;
+  onNotice?: (notice: ClientNotice) => void;
   startServer?: (options: StartServerOptions) => Promise<CoordinatorServer>;
 };
 
@@ -30,6 +31,32 @@ export type Client = {
   cancelSubscription(taskId: string, subscriberId: string): Promise<SubscriptionDetachedMessage>;
   close(): Promise<void>;
 };
+
+export type ClientNotice =
+  | {
+      type: "notice";
+      kind: "subscription-detached";
+      message: string;
+      taskId: string;
+      subscriberId: string;
+      remainingSubscribers: number;
+      taskStillRunning: boolean;
+    }
+  | {
+      type: "notice";
+      kind: "cwd-mismatch";
+      message: string;
+      taskId: string;
+      executionCwd: string;
+      requestedCwd: string;
+    }
+  | {
+      type: "notice";
+      kind: "queued";
+      message: string;
+      taskId: string;
+      position: number;
+    };
 
 type Waiter<T> = {
   predicate: (message: ServerToClient) => message is T;
@@ -48,6 +75,7 @@ type ConnectionState = {
   bootstrappedServer: CoordinatorServer | null;
   registration: Registration;
   onMessage?: (message: ServerToClient) => void;
+  onNotice?: (notice: ClientNotice) => void;
   closePromise: Promise<void>;
   resolveClose: (() => void) | null;
 };
@@ -68,6 +96,7 @@ export async function createClient(options: ClientOptions): Promise<Client> {
     startCoordinator,
     clientVersion,
     onMessage: options.onMessage,
+    onNotice: options.onNotice,
   });
 
   startHeartbeat(state, heartbeatIntervalMs);
@@ -122,13 +151,14 @@ async function connectOrBootstrap(options: {
   startCoordinator: (options: StartServerOptions) => Promise<CoordinatorServer>;
   clientVersion: string;
   onMessage?: (message: ServerToClient) => void;
+  onNotice?: (notice: ClientNotice) => void;
 }): Promise<ConnectionState> {
   const registrationPath = join(options.runtimeDir, "registration.json");
   const existing = await readRegistration(registrationPath);
 
   if (existing) {
     try {
-      return await connectToRegistration(existing, null, options.clientVersion, options.onMessage);
+      return await connectToRegistration(existing, null, options.clientVersion, options.onMessage, options.onNotice);
     } catch (error) {
       if (!options.bootstrapIfMissing) {
         throw error;
@@ -144,6 +174,7 @@ async function connectOrBootstrap(options: {
     bootstrappedServer,
     options.clientVersion,
     options.onMessage,
+    options.onNotice,
   );
 }
 
@@ -152,9 +183,11 @@ async function connectToRegistration(
   bootstrappedServer: CoordinatorServer | null,
   clientVersion: string,
   onMessage?: (message: ServerToClient) => void,
+  onNotice?: (notice: ClientNotice) => void,
 ): Promise<ConnectionState> {
   const state = await openSocket(registration.port, bootstrappedServer, registration);
   state.onMessage = onMessage;
+  state.onNotice = onNotice;
 
   sendMessage(state, {
     type: "hello",
@@ -195,6 +228,7 @@ async function openSocket(
     bootstrappedServer,
     registration,
     onMessage: undefined,
+    onNotice: undefined,
     closePromise,
     resolveClose,
   };
@@ -294,6 +328,7 @@ function sendMessage(state: ConnectionState, message: ClientToServer): void {
 function handleInboundMessage(state: ConnectionState, message: ServerToClient): void {
   state.history.push(message);
   state.onMessage?.(message);
+  emitNotice(state, message);
   for (const waiter of [...state.waiters]) {
     if (!waiter.predicate(message)) {
       continue;
@@ -302,6 +337,49 @@ function handleInboundMessage(state: ConnectionState, message: ServerToClient): 
     clearTimeout(waiter.timeout);
     state.waiters.splice(state.waiters.indexOf(waiter), 1);
     waiter.resolve(message);
+  }
+}
+
+function emitNotice(state: ConnectionState, message: ServerToClient): void {
+  if (!state.onNotice) {
+    return;
+  }
+
+  if (message.type === "accepted" && message.executionCwd !== message.requestedCwd) {
+    state.onNotice({
+      type: "notice",
+      kind: "cwd-mismatch",
+      message: `Task ${message.taskId} is executing in ${message.executionCwd}; your requested cwd was ${message.requestedCwd}.`,
+      taskId: message.taskId,
+      executionCwd: message.executionCwd,
+      requestedCwd: message.requestedCwd,
+    });
+    return;
+  }
+
+  if (message.type === "task-event" && message.event.type === "queued") {
+    state.onNotice({
+      type: "notice",
+      kind: "queued",
+      message: `Task ${message.taskId} is queued at position ${message.event.position}.`,
+      taskId: message.taskId,
+      position: message.event.position,
+    });
+    return;
+  }
+
+  if (message.type === "subscription-detached") {
+    state.onNotice({
+      type: "notice",
+      kind: "subscription-detached",
+      message: message.taskStillRunning
+        ? `Detached from task ${message.taskId}; ${message.remainingSubscribers} subscriber(s) remain.`
+        : `Detached from task ${message.taskId}; task is no longer running.`,
+      taskId: message.taskId,
+      subscriberId: message.subscriberId,
+      remainingSubscribers: message.remainingSubscribers,
+      taskStillRunning: message.taskStillRunning,
+    });
   }
 }
 

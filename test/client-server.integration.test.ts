@@ -1297,3 +1297,169 @@ test("createClient can run commands and detach subscriptions explicitly", async 
     await server.stop();
   }
 });
+
+test("createClient surfaces a notice when explicit detach leaves the task running", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  });
+
+  const notices: Array<{ type: string; message: string }> = [];
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice);
+    },
+  });
+
+  try {
+    const accepted = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setInterval(() => {}, 1000);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const merged = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setInterval(() => {}, 1000);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const detached = await client.cancelSubscription(merged.taskId, merged.subscriberId);
+    expect(detached.taskStillRunning).toBe(true);
+    expect(detached.remainingSubscribers).toBe(1);
+    expect(notices).toContainEqual({
+      type: "notice",
+      kind: "subscription-detached",
+      message: expect.stringContaining("Detached from task"),
+      taskId: merged.taskId,
+      subscriberId: merged.subscriberId,
+      remainingSubscribers: 1,
+      taskStillRunning: true,
+    });
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
+
+test("createClient surfaces a notice for global merge cwd mismatch", async () => {
+  const runtimeDir = await createTempDir();
+  const alternateCwd = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  });
+
+  const notices: Array<{ type: string; message: string }> = [];
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice);
+    },
+  });
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 120);",
+      ],
+      serialMode: "global",
+      mergeMode: "global",
+    });
+
+    await client.run({
+      cwd: alternateCwd,
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 120);",
+      ],
+      serialMode: "global",
+      mergeMode: "global",
+    });
+
+    expect(notices).toContainEqual({
+      type: "notice",
+      kind: "cwd-mismatch",
+      message: expect.stringContaining("executing in"),
+      taskId: first.taskId,
+      executionCwd: process.cwd(),
+      requestedCwd: alternateCwd,
+    });
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
+
+test("createClient surfaces a notice when a task is queued", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  });
+
+  const notices: Array<{ type: string; message: string }> = [];
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice);
+    },
+  });
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 150);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    await client.run({
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 10);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    expect(notices).toContainEqual({
+      type: "notice",
+      kind: "queued",
+      message: expect.stringContaining("queued"),
+      taskId: "task-2",
+      position: 2,
+    });
+  } finally {
+    await client.close();
+    await server.stop();
+  }
+});
