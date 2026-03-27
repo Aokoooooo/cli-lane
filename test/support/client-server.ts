@@ -77,19 +77,6 @@ export async function waitForCollectedMessage(
   throw new Error(`timed out after ${timeoutMs}ms`)
 }
 
-export async function advanceTime(ms: number): Promise<void> {
-  vi.advanceTimersByTime(ms)
-  await Promise.resolve()
-}
-
-export async function settleWithTimers<T>(
-  promise: Promise<T>,
-  advanceMs = 100,
-): Promise<T> {
-  await advanceTime(advanceMs)
-  return await promise
-}
-
 export async function waitForCondition(
   condition: () => boolean | Promise<boolean>,
   timeoutMs = 1_000,

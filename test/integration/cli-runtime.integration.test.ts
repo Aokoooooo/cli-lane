@@ -6,7 +6,6 @@ import {
   createCapturedWriter,
   createMessageCollector,
   createTempDir,
-  settleWithTimers,
   waitForCollectedMessage,
 } from '../support/client-server'
 import { loadConfig } from '../../src/config'
@@ -103,10 +102,10 @@ test('cli ps prints concise task summaries', async () => {
       expect(stdout.toString()).toContain('running')
       expect(stderr.toString()).toBe('')
     } finally {
-      await settleWithTimers(streamingClient.close())
+      await streamingClient.close()
     }
   } finally {
-    await settleWithTimers(bootstrapClient.close())
+    await bootstrapClient.close()
   }
 })
 
@@ -173,7 +172,7 @@ test('cli cancel requests cancellation for a task', async () => {
         (message as { taskId?: string }).taskId === accepted.taskId,
     )
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
   }
 })
 
@@ -219,7 +218,7 @@ test('cli run surfaces a cwd mismatch notice for global merges', async () => {
     expect(exitCode).toBe(0)
     expect(stderr.toString()).toContain('your requested cwd was')
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
   }
 })
 

@@ -1,13 +1,11 @@
-import { expect, test } from 'bun:test'
+import { expect, test, vi } from 'bun:test'
 import { join } from 'node:path'
 import { createClient } from '../../src/client'
 import {
-  advanceTime,
   connectToServer,
   createMessageCollector,
   createTempDir,
   nextMessageWithin,
-  settleWithTimers,
   waitForCondition,
   waitForCollectedMessage,
   waitForMessage,
@@ -542,7 +540,7 @@ test('shuts itself down after the idle timeout and cleans registration', async (
     server.registration,
   )
 
-  await advanceTime(150)
+  vi.advanceTimersByTime(150)
   await waitForCondition(async () => {
     return (await readRegistration(server.registrationPath)) === null
   })
@@ -735,7 +733,7 @@ test('missed heartbeats detach the attached subscriber and auto-cancel the task'
       sentAt: 1,
       serverTime: expect.any(Number),
     })
-    await advanceTime(100)
+    vi.advanceTimersByTime(100)
 
     expect(
       await waitForMessage(
@@ -796,7 +794,7 @@ test('disconnecting during run normalization does not leave a zombie subscriber'
     })
     await nextMessageWithin(inspector)
 
-    await advanceTime(50)
+    vi.advanceTimersByTime(50)
 
     inspector.send({ type: 'ps', requestId: 'ps-zombie' })
     expect(await nextMessageWithin(inspector)).toEqual({
@@ -812,6 +810,7 @@ test('disconnecting during run normalization does not leave a zombie subscriber'
 })
 
 test('unauthenticated connections time out and do not block idle shutdown', async () => {
+  vi.useRealTimers()
   const runtimeDir = await createTempDir()
   const server = await startServer({
     runtimeDir,
@@ -822,9 +821,9 @@ test('unauthenticated connections time out and do not block idle shutdown', asyn
   const session = await connectToServer(server.port)
 
   const closedPromise = session.closed
-  await advanceTime(1_100)
+  await Bun.sleep(1_100)
   await expect(closedPromise).resolves.toBeUndefined()
-  await advanceTime(100)
+  await Bun.sleep(100)
 
   expect(await readRegistration(server.registrationPath)).toBeNull()
   await expect(connectToServer(server.port)).rejects.toThrow()
@@ -839,7 +838,7 @@ test('createClient can bootstrap a coordinator and keep it alive with heartbeats
   })
 
   try {
-    await advanceTime(120)
+    vi.advanceTimersByTime(120)
 
     const ps = await client.ps()
     expect(ps).toEqual({
@@ -848,7 +847,7 @@ test('createClient can bootstrap a coordinator and keep it alive with heartbeats
       tasks: [],
     })
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
   }
 })
 
@@ -968,7 +967,7 @@ test('createClient can run commands and detach subscriptions explicitly', async 
       },
     })
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
     await server.stop()
   }
 })
@@ -1021,7 +1020,7 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
       taskStillRunning: true,
     })
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
     await server.stop()
   }
 })
@@ -1068,7 +1067,7 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
       requestedCwd: alternateCwd,
     })
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
     await server.stop()
   }
 })
@@ -1113,7 +1112,7 @@ test('createClient surfaces a notice when a task is queued', async () => {
       position: 2,
     })
   } finally {
-    await settleWithTimers(client.close())
+    await client.close()
     await server.stop()
   }
 })

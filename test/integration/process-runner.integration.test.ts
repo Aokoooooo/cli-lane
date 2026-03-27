@@ -1,6 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect, test, vi } from 'bun:test'
 import { runProcess, terminateProcess } from '../../src/process-runner'
-import { advanceTime } from '../support/client-server'
 
 test('captures stdout, stderr, callbacks, and exit code', async () => {
   const stdoutChunks: string[] = []
@@ -103,7 +102,7 @@ test('force kills the process after the graceful timeout', async () => {
   })
 
   await readyPromise
-  await advanceTime(50)
+  vi.advanceTimersByTime(50)
   const result = await resultPromise
 
   expect(ready).toBe(true)

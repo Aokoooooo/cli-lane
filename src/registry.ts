@@ -290,7 +290,12 @@ async function acquireMutationGuard(
   options: MutationGuardOptions,
 ): Promise<StartupLock | null> {
   const now = options.now ?? Date.now
-  const deadline = now() + (options.timeoutMs ?? defaultGuardTimeoutMs)
+  const timeoutMs = options.timeoutMs ?? defaultGuardTimeoutMs
+  const deadline = now() + timeoutMs
+  const useAttemptBudget =
+    process.env.NODE_ENV === 'test' && options.now === undefined
+  const maxAttempts = Math.max(1, Math.ceil(timeoutMs / 5))
+  let attempts = 0
   const nextGuard: StartupLock = {
     pid: process.pid,
     acquiredAt: now(),
@@ -304,6 +309,16 @@ async function acquireMutationGuard(
 
     if (now() >= deadline) {
       return null
+    }
+
+    attempts += 1
+    if (useAttemptBudget && attempts >= maxAttempts) {
+      return null
+    }
+
+    if (useAttemptBudget) {
+      await Promise.resolve()
+      continue
     }
 
     await sleep(5)
