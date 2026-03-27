@@ -98,7 +98,9 @@ export type ServerToClient =
   | PsResultMessage
   | ErrorMessage;
 
-export function encodeMessage(message: { type: string }): string {
+export type ProtocolMessage = ClientToServer | ServerToClient;
+
+export function encodeMessage(message: ProtocolMessage): string {
   return `${JSON.stringify(message)}\n`;
 }
 
@@ -119,6 +121,7 @@ export function decodeMessageChunk(buffer: string): {
     try {
       messages.push(JSON.parse(line));
     } catch {
+      // Malformed complete lines are ignored in this minimal codec.
       continue;
     }
   }
