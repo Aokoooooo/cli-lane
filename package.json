@@ -6,6 +6,6 @@
   "scripts": {
     "dev": "bun run src/cli.ts",
     "test": "bun test",
-    "build": "bun build --compile ./src/cli.ts --outfile cli-lane"
+    "build": "bun build --compile src/cli.ts --outfile ./cli-lane"
   }
 }

@@ -168,7 +168,7 @@ async function connectOrBootstrap(options: {
     throw new Error("coordinator registration not found");
   }
 
-  const bootstrappedServer = await options.startCoordinator({ runtimeDir: options.runtimeDir });
+  const bootstrappedServer = await startCoordinatorForRuntime(options);
   try {
     return await connectToRegistration(
       bootstrappedServer.registration,
@@ -181,6 +181,21 @@ async function connectOrBootstrap(options: {
     await bootstrappedServer.stop();
     throw error;
   }
+}
+
+async function startCoordinatorForRuntime(options: {
+  runtimeDir: string;
+  startCoordinator: (options: StartServerOptions) => Promise<CoordinatorServer>;
+}): Promise<CoordinatorServer> {
+  try {
+    return await options.startCoordinator({ runtimeDir: options.runtimeDir });
+  } catch (error) {
+    if (!isListenFailure(error)) {
+      throw error;
+    }
+  }
+
+  return await startCoordinatorInHelperProcess(options.runtimeDir);
 }
 
 async function connectToRegistration(
@@ -216,6 +231,57 @@ async function connectToRegistration(
     await closeClient(state, { stopBootstrappedServer: false });
     throw error;
   }
+}
+
+async function startCoordinatorInHelperProcess(runtimeDir: string): Promise<CoordinatorServer> {
+  const helperScript = join(process.cwd(), "src", "cli.ts");
+  const child = Bun.spawn(["bun", "run", helperScript, "__server__", runtimeDir], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+
+  const registrationPath = join(runtimeDir, "registration.json");
+  const registration = await waitForRegistration(registrationPath);
+
+  return {
+    port: registration.port,
+    registrationPath,
+    registration,
+    stop: async () => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+
+      child.kill();
+
+      const exitedGracefully = await Promise.race([
+        child.exited.then(() => true),
+        sleep(3_000).then(() => false),
+      ]);
+
+      if (!exitedGracefully && child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+
+      await child.exited;
+    },
+  };
+}
+
+async function waitForRegistration(filePath: string, timeoutMs = 5_000): Promise<Registration> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const registration = await readRegistration(filePath);
+    if (registration) {
+      return registration;
+    }
+
+    await sleep(50);
+  }
+
+  throw new Error("timed out waiting for coordinator registration");
 }
 
 async function openSocket(
@@ -461,6 +527,16 @@ function clearHeartbeatTimer(state: ConnectionState): void {
 
   clearInterval(state.heartbeatTimer);
   state.heartbeatTimer = null;
+}
+
+function isListenFailure(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Failed to listen at");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function rejectWaiters(state: ConnectionState, error: Error): void {

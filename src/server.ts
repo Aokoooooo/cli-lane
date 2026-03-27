@@ -24,6 +24,7 @@ export type StartServerOptions = {
   idleTimeoutMs?: number;
   maxBufferedOutputBytes?: number;
   heartbeatTimeoutMs?: number;
+  listenHost?: string;
 };
 
 export type CoordinatorServer = {
@@ -109,7 +110,7 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
   };
 
   const server = Bun.listen({
-    hostname: "127.0.0.1",
+    hostname: options.listenHost ?? "127.0.0.1",
     port: 0,
     socket: {
       open(socket: object) {

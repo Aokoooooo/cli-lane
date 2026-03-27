@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 
+import { startServer } from "./server";
 import { createClient, type ClientNotice } from "./client";
 import { loadConfig, type CliConfig, type MergeMode, type SerialMode } from "./config";
 import type { PsTask, ServerToClient, TaskEvent } from "./protocol";
+import { runProcess } from "./process-runner";
 
 export type CliIO = {
   stdout?: { write(chunk: string): unknown };
@@ -14,6 +16,16 @@ export type CliIO = {
 export async function runCli(args: string[], io: CliIO = {}): Promise<number> {
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
+
+  if (args[0] === "__server__") {
+    const runtimeDir = args[1];
+    if (!runtimeDir) {
+      throw new Error("Missing runtime directory for server mode");
+    }
+
+    await runCoordinatorServer(runtimeDir);
+    return 0;
+  }
 
   if (args.length === 0 || (args.length === 1 && args[0] === "--help")) {
     stdout.write("cli-lane\n");
@@ -66,25 +78,25 @@ async function runCommand(
     resolveCompletion = resolve;
   });
 
-  const client = await createClient({
-    runtimeDir: config.runtimeDir,
-    clientVersion: config.clientVersion,
-    heartbeatIntervalMs: config.heartbeatIntervalMs,
-    bootstrapIfMissing: config.bootstrapIfMissing,
-    onNotice(notice) {
-      writeLine(stderr, notice.message);
-    },
-    onMessage(message) {
-      if (!streaming) {
-        bufferedMessages.push(message);
-        return;
-      }
-
-      routeRunMessage(message, activeTaskId, stdout, stderr, finish);
-    },
-  });
-
+  let client;
   try {
+    client = await createClient({
+      runtimeDir: config.runtimeDir,
+      clientVersion: config.clientVersion,
+      heartbeatIntervalMs: config.heartbeatIntervalMs,
+      bootstrapIfMissing: config.bootstrapIfMissing,
+      onNotice(notice) {
+        writeLine(stderr, notice.message);
+      },
+      onMessage(message) {
+        if (!streaming) {
+          bufferedMessages.push(message);
+          return;
+        }
+
+        routeRunMessage(message, activeTaskId, stdout, stderr, finish);
+      },
+    });
     const accepted = await client.run({
       cwd: parsed.cwd,
       argv: parsed.argv,
@@ -99,8 +111,20 @@ async function runCommand(
     }
 
     return await completion;
+  } catch (error) {
+    if (client) {
+      await client.close();
+    }
+
+    if (isBootstrapFailure(error)) {
+      return await runDirectCommand(parsed, stdout, stderr);
+    }
+
+    throw error;
   } finally {
-    await client.close();
+    if (client) {
+      await client.close();
+    }
   }
 
   function finish(code: number): void {
@@ -111,6 +135,29 @@ async function runCommand(
     completionResolved = true;
     resolveCompletion?.(code);
   }
+}
+
+async function runDirectCommand(
+  parsed: { cwd: string; serialMode: SerialMode; mergeMode: MergeMode; argv: string[] },
+  stdout: { write(chunk: string): unknown },
+  stderr: { write(chunk: string): unknown },
+): Promise<number> {
+  const result = await runProcess({
+    cwd: parsed.cwd,
+    argv: parsed.argv,
+    onStdout(chunk) {
+      stdout.write(chunk);
+    },
+    onStderr(chunk) {
+      stderr.write(chunk);
+    },
+  });
+
+  if (result.signal) {
+    return signalExitCode(result.signal);
+  }
+
+  return result.code ?? 1;
 }
 
 async function psCommand(
@@ -321,4 +368,30 @@ function requireValue(args: string[], index: number, flag: string): string {
   }
 
   return args[index];
+}
+
+function isBootstrapFailure(error: unknown): boolean {
+  return error instanceof Error && (
+    error.message.includes("Failed to listen at") ||
+    error.message.includes("timed out waiting for coordinator registration") ||
+    error.message.includes("coordinator registration not found")
+  );
+}
+
+async function runCoordinatorServer(runtimeDir: string): Promise<void> {
+  const server = await startServer({ runtimeDir, listenHost: "127.0.0.1" });
+  const shutdown = async () => {
+    await server.stop();
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown().finally(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void shutdown().finally(() => process.exit(0));
+  });
+
+  await new Promise<void>(() => {
+    // Keep the helper process alive until it is stopped from the outside or by idle timeout.
+  });
 }
