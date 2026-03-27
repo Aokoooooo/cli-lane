@@ -1,9 +1,10 @@
-export const protocolVersion = "1";
+export const protocolVersion = 1;
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion?: string;
-  clientVersion?: string;
+  token: string;
+  protocolVersion: number;
+  clientVersion: string;
 };
 
 export type HeartbeatMessage = {
@@ -11,9 +12,37 @@ export type HeartbeatMessage = {
   sentAt: number;
 };
 
+export type RunMessage = {
+  type: "run";
+  requestId: string;
+  cwd: string;
+  argv: string[];
+  serialMode: boolean;
+  mergeMode: boolean;
+};
+
+export type CancelSubscriptionMessage = {
+  type: "cancel-subscription";
+  taskId: string;
+  subscriberId: string;
+};
+
+export type CancelTaskMessage = {
+  type: "cancel-task";
+  taskId: string;
+};
+
+export type PsMessage = {
+  type: "ps";
+  requestId: string;
+};
+
 export type AcceptedMessage = {
   type: "accepted";
+  requestId: string;
   taskId: string;
+  subscriberId: string;
+  merged: boolean;
 };
 
 export type TaskEventMessage = {
@@ -24,21 +53,39 @@ export type TaskEventMessage = {
 
 export type PsResultMessage = {
   type: "ps-result";
-  taskId: string;
-  output?: string;
-  exitCode?: number;
+  requestId: string;
+  tasks: unknown[];
 };
 
 export type ErrorMessage = {
   type: "error";
   message: string;
+  requestId?: string;
 };
 
-export type ClientToServer = HelloMessage | HeartbeatMessage | TaskEventMessage;
+export type HelloAckMessage = {
+  type: "hello-ack";
+  serverVersion: string;
+  protocolVersion: number;
+};
 
-export type ServerToClient =
+export type HeartbeatAckMessage = {
+  type: "heartbeat-ack";
+  sentAt: number;
+  serverTime: number;
+};
+
+export type ClientToServer =
   | HelloMessage
   | HeartbeatMessage
+  | RunMessage
+  | CancelSubscriptionMessage
+  | CancelTaskMessage
+  | PsMessage;
+
+export type ServerToClient =
+  | HelloAckMessage
+  | HeartbeatAckMessage
   | AcceptedMessage
   | TaskEventMessage
   | PsResultMessage
