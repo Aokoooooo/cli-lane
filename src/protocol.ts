@@ -1,9 +1,16 @@
 export const protocolVersion = 1;
+export type ProtocolVersion = typeof protocolVersion;
+
+export type TaskEventName = string;
+
+export type PsTask = {
+  taskId: string;
+};
 
 export type HelloMessage = {
   type: "hello";
   token: string;
-  protocolVersion: number;
+  protocolVersion: ProtocolVersion;
   clientVersion: string;
 };
 
@@ -17,8 +24,8 @@ export type RunMessage = {
   requestId: string;
   cwd: string;
   argv: string[];
-  serialMode: boolean;
-  mergeMode: boolean;
+  serialMode: "global" | "by-cwd";
+  mergeMode: "by-cwd" | "global" | "off";
 };
 
 export type CancelSubscriptionMessage = {
@@ -48,13 +55,13 @@ export type AcceptedMessage = {
 export type TaskEventMessage = {
   type: "task-event";
   taskId: string;
-  event: string;
+  event: TaskEventName;
 };
 
 export type PsResultMessage = {
   type: "ps-result";
   requestId: string;
-  tasks: unknown[];
+  tasks: PsTask[];
 };
 
 export type ErrorMessage = {
@@ -66,7 +73,7 @@ export type ErrorMessage = {
 export type HelloAckMessage = {
   type: "hello-ack";
   serverVersion: string;
-  protocolVersion: number;
+  protocolVersion: ProtocolVersion;
 };
 
 export type HeartbeatAckMessage = {
@@ -95,10 +102,16 @@ export function encodeMessage(message: { type: string }): string {
   return `${JSON.stringify(message)}\n`;
 }
 
-export function decodeMessages(buffer: string): unknown[] {
+export function decodeMessageChunk(buffer: string): {
+  messages: unknown[];
+  remainder: string;
+} {
+  const lines = buffer.split(/\r?\n/);
+  const hasTrailingNewline = /\r?\n$/.test(buffer);
+  const remainder = hasTrailingNewline ? "" : lines.pop() ?? "";
   const messages: unknown[] = [];
 
-  for (const line of buffer.split(/\r?\n/)) {
+  for (const line of lines) {
     if (!line.trim()) {
       continue;
     }
@@ -110,5 +123,9 @@ export function decodeMessages(buffer: string): unknown[] {
     }
   }
 
-  return messages;
+  return { messages, remainder };
+}
+
+export function decodeMessages(buffer: string): unknown[] {
+  return decodeMessageChunk(buffer).messages;
 }
