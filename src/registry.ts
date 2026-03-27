@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export type Registration = {
@@ -42,10 +42,7 @@ export type AcquireStartupLockOptions = {
   pidExists?: (pid: number) => boolean;
   coordinatorAvailable?: () => boolean;
   guardNow?: () => number;
-  guardPidExists?: (pid: number) => boolean;
-  guardStaleAfterMs?: number;
   guardTimeoutMs?: number;
-  onBeforeStaleGuardIsolation?: () => void | Promise<void>;
 };
 
 type LockFileRecord = {
@@ -55,13 +52,9 @@ type LockFileRecord = {
 
 type MutationGuardOptions = {
   now?: () => number;
-  pidExists?: (pid: number) => boolean;
-  staleAfterMs?: number;
   timeoutMs?: number;
-  beforeStaleGuardIsolation?: () => void | Promise<void>;
 };
 
-const defaultGuardStaleAfterMs = 1_000;
 const defaultGuardTimeoutMs = 1_000;
 
 export async function readRegistration(filePath: string): Promise<Registration | null> {
@@ -153,10 +146,7 @@ export async function acquireStartupLock(
     return (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) ? nextLock : null;
   }, {
     now: options.guardNow,
-    pidExists: options.guardPidExists,
-    staleAfterMs: options.guardStaleAfterMs,
     timeoutMs: options.guardTimeoutMs,
-    beforeStaleGuardIsolation: options.onBeforeStaleGuardIsolation,
   });
 }
 
@@ -275,18 +265,6 @@ async function acquireMutationGuard(
       return nextGuard;
     }
 
-    const currentRecord = await readLockFileRecord(guardPath);
-    if (currentRecord !== null && isStaleMutationGuard(currentRecord.lock, {
-      now: now(),
-      pidExists: options.pidExists ?? defaultPidExists,
-      staleAfterMs: options.staleAfterMs ?? defaultGuardStaleAfterMs,
-    })) {
-      if (await isolateObservedGuard(guardPath, currentRecord.raw, options.beforeStaleGuardIsolation)) {
-        continue;
-      }
-      continue;
-    }
-
     if (now() >= deadline) {
       return null;
     }
@@ -314,74 +292,8 @@ async function releaseMutationGuard(guardPath: string, owner: StartupLock): Prom
   return true;
 }
 
-async function isolateObservedGuard(
-  guardPath: string,
-  observedRaw: string,
-  beforeStaleGuardIsolation?: () => void | Promise<void>,
-): Promise<boolean> {
-  await beforeStaleGuardIsolation?.();
-
-  const quarantinePath = `${guardPath}.${randomUUID()}.quarantine`;
-
-  try {
-    await link(guardPath, quarantinePath);
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return false;
-    }
-
-    throw error;
-  }
-
-  try {
-    const quarantinedRecord = await readLockFileRecord(quarantinePath);
-    if (quarantinedRecord === null || quarantinedRecord.raw !== observedRaw) {
-      return false;
-    }
-
-    const [guardStat, quarantineStat] = await Promise.all([
-      safeLstat(guardPath),
-      safeLstat(quarantinePath),
-    ]);
-    if (
-      guardStat === null ||
-      quarantineStat === null ||
-      guardStat.dev !== quarantineStat.dev ||
-      guardStat.ino !== quarantineStat.ino
-    ) {
-      return false;
-    }
-
-    await rm(guardPath, { force: false });
-    return true;
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return false;
-    }
-
-    throw error;
-  } finally {
-    await rm(quarantinePath, { force: true });
-  }
-}
-
 function createTempPath(filePath: string): string {
   return join(dirname(filePath), `${filePath.split("/").pop() ?? "file"}.${randomUUID()}.tmp`);
-}
-
-function isStaleMutationGuard(
-  guard: StartupLock | null,
-  options: Required<Pick<MutationGuardOptions, "pidExists" | "staleAfterMs">> & { now: number },
-): boolean {
-  if (guard === null) {
-    return true;
-  }
-
-  if (!options.pidExists(guard.pid)) {
-    return true;
-  }
-
-  return options.now - guard.acquiredAt > options.staleAfterMs;
 }
 
 function isSameLockOwner(left: StartupLock, right: StartupLock): boolean {
@@ -399,18 +311,6 @@ function defaultPidExists(pid: number): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function safeLstat(filePath: string) {
-  try {
-    return await lstat(filePath);
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return null;
-    }
-
-    throw error;
-  }
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
