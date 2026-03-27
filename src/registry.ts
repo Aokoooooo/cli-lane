@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export type Registration = {
@@ -45,6 +45,7 @@ export type AcquireStartupLockOptions = {
   guardPidExists?: (pid: number) => boolean;
   guardStaleAfterMs?: number;
   guardTimeoutMs?: number;
+  onBeforeStaleGuardIsolation?: () => void | Promise<void>;
 };
 
 type LockFileRecord = {
@@ -57,6 +58,7 @@ type MutationGuardOptions = {
   pidExists?: (pid: number) => boolean;
   staleAfterMs?: number;
   timeoutMs?: number;
+  beforeStaleGuardIsolation?: () => void | Promise<void>;
 };
 
 const defaultGuardStaleAfterMs = 1_000;
@@ -154,6 +156,7 @@ export async function acquireStartupLock(
     pidExists: options.guardPidExists,
     staleAfterMs: options.guardStaleAfterMs,
     timeoutMs: options.guardTimeoutMs,
+    beforeStaleGuardIsolation: options.onBeforeStaleGuardIsolation,
   });
 }
 
@@ -278,9 +281,8 @@ async function acquireMutationGuard(
       pidExists: options.pidExists ?? defaultPidExists,
       staleAfterMs: options.staleAfterMs ?? defaultGuardStaleAfterMs,
     })) {
-      const latestRecord = await readLockFileRecord(guardPath);
-      if (latestRecord !== null && latestRecord.raw === currentRecord.raw) {
-        await rm(guardPath, { force: true });
+      if (await isolateObservedGuard(guardPath, currentRecord.raw, options.beforeStaleGuardIsolation)) {
+        continue;
       }
       continue;
     }
@@ -310,6 +312,57 @@ async function releaseMutationGuard(guardPath: string, owner: StartupLock): Prom
 
   await rm(guardPath, { force: true });
   return true;
+}
+
+async function isolateObservedGuard(
+  guardPath: string,
+  observedRaw: string,
+  beforeStaleGuardIsolation?: () => void | Promise<void>,
+): Promise<boolean> {
+  await beforeStaleGuardIsolation?.();
+
+  const quarantinePath = `${guardPath}.${randomUUID()}.quarantine`;
+
+  try {
+    await link(guardPath, quarantinePath);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return false;
+    }
+
+    throw error;
+  }
+
+  try {
+    const quarantinedRecord = await readLockFileRecord(quarantinePath);
+    if (quarantinedRecord === null || quarantinedRecord.raw !== observedRaw) {
+      return false;
+    }
+
+    const [guardStat, quarantineStat] = await Promise.all([
+      safeLstat(guardPath),
+      safeLstat(quarantinePath),
+    ]);
+    if (
+      guardStat === null ||
+      quarantineStat === null ||
+      guardStat.dev !== quarantineStat.dev ||
+      guardStat.ino !== quarantineStat.ino
+    ) {
+      return false;
+    }
+
+    await rm(guardPath, { force: false });
+    return true;
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return false;
+    }
+
+    throw error;
+  } finally {
+    await rm(quarantinePath, { force: true });
+  }
 }
 
 function createTempPath(filePath: string): string {
@@ -346,6 +399,18 @@ function defaultPidExists(pid: number): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function safeLstat(filePath: string) {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
