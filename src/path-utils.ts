@@ -1,12 +1,12 @@
 import path from "node:path";
 import { realpath } from "node:fs/promises";
 
-export function normalizeSeparators(input: string): string {
-  if (path.sep === "/") {
-    return input.replace(/\\+/gu, "/");
+function normalizeSeparators(input: string): string {
+  if (process.platform !== "win32") {
+    return input;
   }
 
-  return input.replace(/\//gu, "\\");
+  return input.replace(/\/+/gu, "\\");
 }
 
 function stripTrailingSeparators(input: string): string {

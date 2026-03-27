@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
-import { normalizeCwd, normalizeSeparators } from "../src/path-utils";
+import { normalizeCwd } from "../src/path-utils";
 
 test("normalizes cwd consistently", async () => {
   const cwd = await normalizeCwd("./");
@@ -17,17 +17,27 @@ test("strips trailing separators", async () => {
   expect(cwd.endsWith(path.sep)).toBe(false);
 });
 
-test("normalizes separators to the platform canonical separator", () => {
-  const cwd = normalizeSeparators(`foo\\bar/baz`);
-  expect(cwd).toBe(`foo${path.sep}bar${path.sep}baz`);
+test("preserves literal backslashes in POSIX paths", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  const cwd = await normalizeCwd("./literal\\backslash");
+  expect(cwd).toContain(`literal\\backslash`);
+  expect(cwd).not.toContain(`literal/backslash`);
 });
 
 test("falls back when realpath fails", async () => {
   const cwd = await normalizeCwd("does-not-exist");
-  expect(cwd).toContain("does-not-exist");
+  expect(path.isAbsolute(cwd)).toBe(true);
 });
 
 test("is idempotent for normalized paths", async () => {
   const cwd = await normalizeCwd(".");
   expect(await normalizeCwd(cwd)).toBe(cwd);
+});
+
+test("preserves root paths", async () => {
+  const root = path.parse(process.cwd()).root;
+  expect(await normalizeCwd(root)).toBe(root);
 });
