@@ -37,6 +37,7 @@ type TaskRecord = {
   cancelReason?: CancelReason;
   finishedAt?: number;
   expiresAt?: number;
+  retainedSnapshot?: TaskSnapshot;
 };
 
 export type CreateOrAttachResult = {
@@ -157,6 +158,7 @@ export class TaskManager {
     task.status = "finished";
     task.cancelReason = undefined;
     this.stampTerminalRetention(task);
+    this.freezeRetainedSnapshot(task);
     this.removeMergeIndex(task);
     return true;
   }
@@ -185,6 +187,7 @@ export class TaskManager {
     task.status = "canceled";
     task.cancelReason = reason;
     this.stampTerminalRetention(task);
+    this.freezeRetainedSnapshot(task);
     this.removeMergeIndex(task);
   }
 
@@ -195,7 +198,30 @@ export class TaskManager {
   }
 
   private toSnapshot(task: TaskRecord): TaskSnapshot {
+    if (task.retainedSnapshot) {
+      return {
+        ...task.retainedSnapshot,
+        argv: [...task.retainedSnapshot.argv],
+        requestedCwds: [...task.retainedSnapshot.requestedCwds],
+      };
+    }
+
     return {
+      taskId: task.taskId,
+      argv: [...task.argv],
+      mergeMode: task.mergeMode,
+      status: task.status,
+      requestedCwds: this.collectRequestedCwds(task),
+      canonicalExecutionCwd: task.canonicalExecutionCwd,
+      subscriberCount: task.subscribers.size,
+      cancelReason: task.cancelReason,
+      finishedAt: task.finishedAt,
+      expiresAt: task.expiresAt,
+    };
+  }
+
+  private freezeRetainedSnapshot(task: TaskRecord): void {
+    task.retainedSnapshot = {
       taskId: task.taskId,
       argv: [...task.argv],
       mergeMode: task.mergeMode,

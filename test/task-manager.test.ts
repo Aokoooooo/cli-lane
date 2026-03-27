@@ -347,3 +347,25 @@ test("recently canceled tasks also expire after the TTL", () => {
   now = 2_500;
   expect(manager.listTasks()).toEqual([]);
 });
+
+test("retained terminal snapshots stay stable when subscribers detach after finish or cancel", () => {
+  const manager = new TaskManager({
+    finishedTaskTtlMs: 500,
+    now: () => 3_000,
+  });
+
+  const finishedFirst = manager.createOrAttach(request({ cwd: "/work/finished-a", argv: ["bun", "done"], mergeMode: "global" }));
+  const finishedSecond = manager.createOrAttach(request({ cwd: "/work/finished-b", argv: ["bun", "done"], mergeMode: "global" }));
+  expect(manager.markTaskRunning(finishedFirst.taskId)).toBe(true);
+  expect(manager.markTaskFinished(finishedFirst.taskId)).toBe(true);
+
+  const canceledFirst = manager.createOrAttach(request({ cwd: "/work/canceled-a", argv: ["bun", "stop"], mergeMode: "global" }));
+  const canceledSecond = manager.createOrAttach(request({ cwd: "/work/canceled-b", argv: ["bun", "stop"], mergeMode: "global" }));
+  expect(manager.cancelTask(canceledFirst.taskId)).toBe(true);
+
+  const beforeDetach = manager.listTasks();
+
+  expect(manager.detachSubscriber(finishedFirst.taskId, finishedSecond.subscriberId)).toBe(true);
+  expect(manager.detachSubscriber(canceledFirst.taskId, canceledSecond.subscriberId)).toBe(true);
+  expect(manager.listTasks()).toEqual(beforeDetach);
+});
