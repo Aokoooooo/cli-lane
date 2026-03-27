@@ -150,15 +150,13 @@ export class TaskManager {
 
     const task = this.tasks.get(taskId);
 
-    if (!task || (task.status !== "queued" && task.status !== "running")) {
+    if (!task || task.status !== "running") {
       return false;
     }
 
-    const now = this.now();
     task.status = "finished";
     task.cancelReason = undefined;
-    task.finishedAt = now;
-    task.expiresAt = now + this.finishedTaskTtlMs;
+    this.stampTerminalRetention(task);
     this.removeMergeIndex(task);
     return true;
   }
@@ -166,18 +164,15 @@ export class TaskManager {
   listTasks(): TaskSnapshot[] {
     this.pruneExpiredFinishedTasks();
 
-    return [...this.tasks.values()].map((task) => ({
-      taskId: task.taskId,
-      argv: [...task.argv],
-      mergeMode: task.mergeMode,
-      status: task.status,
-      requestedCwds: this.collectRequestedCwds(task),
-      canonicalExecutionCwd: task.canonicalExecutionCwd,
-      subscriberCount: task.subscribers.size,
-      cancelReason: task.cancelReason,
-      finishedAt: task.finishedAt,
-      expiresAt: task.expiresAt,
-    }));
+    return [...this.tasks.values()].map((task) => this.toSnapshot(task));
+  }
+
+  listActiveTasks(): TaskSnapshot[] {
+    this.pruneExpiredFinishedTasks();
+
+    return [...this.tasks.values()]
+      .filter((task) => task.status === "queued" || task.status === "running")
+      .map((task) => this.toSnapshot(task));
   }
 
   private attachSubscriber(task: TaskRecord, requestedCwd: string): string {
@@ -189,9 +184,29 @@ export class TaskManager {
   private cancelTaskInternal(task: TaskRecord, reason: CancelReason): void {
     task.status = "canceled";
     task.cancelReason = reason;
-    task.finishedAt = undefined;
-    task.expiresAt = undefined;
+    this.stampTerminalRetention(task);
     this.removeMergeIndex(task);
+  }
+
+  private stampTerminalRetention(task: TaskRecord): void {
+    const now = this.now();
+    task.finishedAt = now;
+    task.expiresAt = now + this.finishedTaskTtlMs;
+  }
+
+  private toSnapshot(task: TaskRecord): TaskSnapshot {
+    return {
+      taskId: task.taskId,
+      argv: [...task.argv],
+      mergeMode: task.mergeMode,
+      status: task.status,
+      requestedCwds: this.collectRequestedCwds(task),
+      canonicalExecutionCwd: task.canonicalExecutionCwd,
+      subscriberCount: task.subscribers.size,
+      cancelReason: task.cancelReason,
+      finishedAt: task.finishedAt,
+      expiresAt: task.expiresAt,
+    };
   }
 
   private collectRequestedCwds(task: TaskRecord): string[] {
@@ -228,7 +243,7 @@ export class TaskManager {
     const now = this.now();
 
     for (const [taskId, task] of this.tasks) {
-      if (task.status !== "finished") {
+      if (task.status !== "finished" && task.status !== "canceled") {
         continue;
       }
 
