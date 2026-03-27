@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -19,15 +20,13 @@ function stripTrailingSeparators(input: string): string {
   return input.replace(/[\\/]+$/u, '')
 }
 
-export async function normalizeCwd(input: string): Promise<string> {
-  const absolute = path.resolve(input)
-
-  let normalized = absolute
+export function normalizeCwdForKey(input: string): string {
+  let normalized = path.resolve(input)
 
   try {
-    normalized = await realpath(absolute)
+    normalized = realpathSync(normalized)
   } catch {
-    normalized = absolute
+    normalized = path.resolve(input)
   }
 
   normalized = normalizeSeparators(normalized)
@@ -38,4 +37,18 @@ export async function normalizeCwd(input: string): Promise<string> {
   }
 
   return normalized
+}
+
+export async function normalizeCwd(input: string): Promise<string> {
+  const absolute = normalizeCwdForKey(input)
+
+  let normalized = absolute
+
+  try {
+    normalized = await realpath(absolute)
+  } catch {
+    normalized = absolute
+  }
+
+  return normalizeCwdForKey(normalized)
 }

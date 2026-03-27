@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { normalizeCwdForKey } from './path-utils'
 
 export type SerialMode = 'global' | 'by-cwd'
 export type MergeMode = 'global' | 'by-cwd' | 'off'
@@ -21,7 +24,7 @@ export function loadConfig(
   cwd = process.cwd(),
 ): CliConfig {
   return {
-    runtimeDir: env.CLI_LANE_RUNTIME_DIR ?? join(cwd, '.cli-lane'),
+    runtimeDir: env.CLI_LANE_RUNTIME_DIR ?? defaultRuntimeDirForCwd(cwd),
     defaultCwd: cwd,
     serialMode: parseSerialMode(env.CLI_LANE_SERIAL_MODE),
     mergeMode: parseMergeMode(env.CLI_LANE_MERGE_MODE),
@@ -32,6 +35,14 @@ export function loadConfig(
     ),
     bootstrapIfMissing: parseBoolean(env.CLI_LANE_BOOTSTRAP_IF_MISSING, true),
   }
+}
+
+function defaultRuntimeDirForCwd(cwd: string): string {
+  const cwdHash = createHash('sha256')
+    .update(normalizeCwdForKey(cwd))
+    .digest('hex')
+    .slice(0, 16)
+  return join(tmpdir(), 'cli-lane', cwdHash)
 }
 
 function parseSerialMode(value: string | undefined): SerialMode {

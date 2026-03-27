@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test'
+import { mkdir, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runCli } from '../../src/cli'
 import type { ClientNotice } from '../../src/client'
@@ -14,10 +16,40 @@ import {
 test('config defaults runtime directory and merge modes', () => {
   const config = loadConfig({}, '/workspace')
 
-  expect(config.runtimeDir).toBe(join('/workspace', '.cli-lane'))
+  expect(config.runtimeDir).toStartWith(join(tmpdir(), 'cli-lane'))
+  expect(config.runtimeDir).not.toContain('/workspace/.cli-lane')
   expect(config.defaultCwd).toBe('/workspace')
   expect(config.serialMode).toBe('global')
   expect(config.mergeMode).toBe('by-cwd')
+})
+
+test('config derives distinct default runtime directories per cwd', () => {
+  const first = loadConfig({}, '/workspace/project-a')
+  const second = loadConfig({}, '/workspace/project-b')
+
+  expect(first.runtimeDir).not.toBe(second.runtimeDir)
+  expect(first.runtimeDir).toStartWith(join(tmpdir(), 'cli-lane'))
+  expect(second.runtimeDir).toStartWith(join(tmpdir(), 'cli-lane'))
+})
+
+test('config derives the same default runtime directory for equivalent cwd strings', () => {
+  const first = loadConfig({}, '/workspace/project-a')
+  const second = loadConfig({}, '/workspace/project-a/')
+
+  expect(first.runtimeDir).toBe(second.runtimeDir)
+})
+
+test('config derives the same default runtime directory for symlinked cwd aliases', async () => {
+  const baseDir = await createTempDir()
+  const realDir = join(baseDir, 'real')
+  const aliasDir = join(baseDir, 'alias')
+  await mkdir(realDir)
+  await symlink(realDir, aliasDir)
+
+  const first = loadConfig({}, realDir)
+  const second = loadConfig({}, aliasDir)
+
+  expect(first.runtimeDir).toBe(second.runtimeDir)
 })
 
 test('cli run forwards argv after -- and uses the default cwd', async () => {

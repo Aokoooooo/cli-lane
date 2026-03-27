@@ -65,6 +65,8 @@ Example:
 cli-lane run --serial-mode by-cwd --merge-mode by-cwd -- bun test
 ```
 
+By default, `cli-lane` stores runtime state under the system temp directory in a cwd-specific subdirectory. Set `CLI_LANE_RUNTIME_DIR` to override that location explicitly.
+
 ## Cancellation
 
 `Ctrl+C` detaches the current subscriber. It does not always cancel the underlying task.

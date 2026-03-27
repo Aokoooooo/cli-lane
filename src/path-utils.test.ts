@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test'
+import { mkdir, symlink } from 'node:fs/promises'
 import path from 'node:path'
-import { normalizeCwd } from './path-utils'
+import { normalizeCwd, normalizeCwdForKey } from './path-utils'
+import { createTempDir } from '../test/support/client-server'
 
 test('normalizes cwd consistently', async () => {
   const cwd = await normalizeCwd('./')
@@ -40,4 +42,20 @@ test('is idempotent for normalized paths', async () => {
 test('preserves root paths', async () => {
   const root = path.parse(process.cwd()).root
   expect(await normalizeCwd(root)).toBe(root)
+})
+
+test('normalizeCwdForKey strips trailing separators', () => {
+  expect(normalizeCwdForKey('/workspace/project')).toBe(
+    normalizeCwdForKey('/workspace/project/'),
+  )
+})
+
+test('normalizeCwdForKey resolves symlink aliases consistently', async () => {
+  const baseDir = await createTempDir()
+  const realDir = path.join(baseDir, 'real')
+  const aliasDir = path.join(baseDir, 'alias')
+  await mkdir(realDir)
+  await symlink(realDir, aliasDir)
+
+  expect(normalizeCwdForKey(realDir)).toBe(normalizeCwdForKey(aliasDir))
 })
