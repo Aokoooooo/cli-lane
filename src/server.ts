@@ -1,18 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { runProcess } from "./process-runner";
-import { decodeMessageChunk, encodeMessage, protocolVersion, type ServerToClient } from "./protocol";
+import { OutputBuffer, type OutputChunk } from "./output-buffer";
 import { normalizeCwd } from "./path-utils";
+import {
+  decodeMessageChunk,
+  encodeMessage,
+  protocolVersion,
+  type PsTask,
+  type RunMessage,
+  type ServerToClient,
+  type TaskEvent,
+} from "./protocol";
+import { runProcess } from "./process-runner";
 import { acquireStartupLock, removeRegistration, type Registration, writeRegistration } from "./registry";
-import { Scheduler } from "./scheduler";
-import { TaskManager, type TaskMergeMode } from "./task-manager";
+import { Scheduler, type SchedulerTask } from "./scheduler";
+import { TaskManager, type TaskMergeMode, type TaskSnapshot } from "./task-manager";
 
 export type StartServerOptions = {
   runtimeDir: string;
   serverVersion?: string;
   terminateGraceMs?: number;
   idleTimeoutMs?: number;
+  maxBufferedOutputBytes?: number;
 };
 
 export type CoordinatorServer = {
@@ -22,69 +32,90 @@ export type CoordinatorServer = {
   stop: () => Promise<void>;
 };
 
+type ReplayState = {
+  lastSeq: number;
+  pending: ServerToClient[];
+};
+
 type Session = {
   socket: any;
   buffer: string;
   authed: boolean;
   subscriptions: Map<string, string>;
+  replays: Map<string, ReplayState>;
 };
 
-type RunState = {
+type TaskRuntimeState = {
   taskId: string;
   serialMode: "global" | "by-cwd";
   mergeMode: TaskMergeMode;
   serialKey: string;
   controller: AbortController;
+  buffer: OutputBuffer;
   terminalEventSent: boolean;
 };
 
 type ServerRuntime = {
   taskManager: TaskManager;
   scheduler: Scheduler;
-  runs: Map<string, RunState>;
+  taskStates: Map<string, TaskRuntimeState>;
   sessions: Set<Session>;
   taskSessions: Map<string, Set<Session>>;
+  laneQueues: Map<string, string[]>;
   sessionBySocket: WeakMap<object, Session>;
   stopped: boolean;
   registrationToken: string;
   terminateGraceMs: number;
+  idleTimeoutMs: number | null;
+  maxBufferedOutputBytes: number;
+  idleTimer: Timer | null;
+  stopServer: (() => Promise<void>) | null;
 };
 
 const DEFAULT_SERVER_VERSION = "0.1.0";
+const DEFAULT_TERMINATE_GRACE_MS = 3_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export async function startServer(options: StartServerOptions): Promise<CoordinatorServer> {
   await mkdir(options.runtimeDir, { recursive: true });
 
   const registrationPath = join(options.runtimeDir, "registration.json");
-  const terminateGraceMs = options.terminateGraceMs ?? 3_000;
   const runtime: ServerRuntime = {
     taskManager: new TaskManager(),
     scheduler: new Scheduler(),
-    runs: new Map(),
+    taskStates: new Map(),
     sessions: new Set(),
     taskSessions: new Map(),
+    laneQueues: new Map(),
     sessionBySocket: new WeakMap(),
     stopped: false,
     registrationToken: "",
-    terminateGraceMs,
+    terminateGraceMs: options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS,
+    idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+    maxBufferedOutputBytes: options.maxBufferedOutputBytes ?? DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
+    idleTimer: null,
+    stopServer: null,
   };
 
   const server = Bun.listen({
     hostname: "127.0.0.1",
     port: 0,
     socket: {
-      open(socket) {
+      open(socket: object) {
         const session: Session = {
           socket,
           buffer: "",
           authed: false,
           subscriptions: new Map(),
+          replays: new Map(),
         };
 
         runtime.sessions.add(session);
         runtime.sessionBySocket.set(socket, session);
+        refreshIdleTimer(runtime);
       },
-      data(socket, chunk) {
+      data(socket: object, chunk: string | Uint8Array) {
         const session = runtime.sessionBySocket.get(socket);
         if (!session || runtime.stopped) {
           return;
@@ -98,14 +129,16 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
           void handleMessage(runtime, session, message);
         }
       },
-      close(socket) {
+      close(socket: object) {
         const session = runtime.sessionBySocket.get(socket);
         if (!session) {
           return;
         }
 
         runtime.sessions.delete(session);
-        void detachSession(runtime, session);
+        void detachSession(runtime, session).finally(() => {
+          refreshIdleTimer(runtime);
+        });
       },
     },
   } as any);
@@ -140,51 +173,53 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     throw error;
   }
 
+  const stop = async () => {
+    if (runtime.stopped) {
+      return;
+    }
+
+    runtime.stopped = true;
+    clearIdleTimer(runtime);
+
+    for (const taskState of runtime.taskStates.values()) {
+      taskState.controller.abort();
+    }
+
+    for (const session of runtime.sessions) {
+      session.socket.end?.();
+      session.socket.terminate?.();
+      session.socket.close?.();
+    }
+
+    await removeRegistration(registrationPath);
+    server.stop();
+    await rm(join(options.runtimeDir, "startup.lock"), { force: true });
+  };
+
+  runtime.stopServer = stop;
+  refreshIdleTimer(runtime);
+
   return {
     port: server.port,
     registrationPath,
     registration,
-    stop: async () => {
-      if (runtime.stopped) {
-        return;
-      }
-
-      runtime.stopped = true;
-
-      for (const runState of runtime.runs.values()) {
-        runState.controller.abort();
-      }
-
-      for (const session of runtime.sessions) {
-        session.socket.end();
-      }
-
-      await removeRegistration(registrationPath);
-      server.stop();
-      await rm(join(options.runtimeDir, "startup.lock"), { force: true });
-    },
+    stop,
   };
 }
 
 async function handleMessage(runtime: ServerRuntime, session: Session, message: unknown): Promise<void> {
   if (!isRecord(message) || typeof message.type !== "string") {
-    send(session, {
-      type: "error",
-      message: "invalid message",
-    });
+    send(session, { type: "error", message: "invalid message" });
     return;
   }
 
   if (message.type === "hello") {
-    await handleHello(session, message, runtime.registrationToken);
+    await handleHello(runtime, session, message);
     return;
   }
 
   if (!session.authed) {
-    send(session, {
-      type: "error",
-      message: "hello required before other messages",
-    });
+    send(session, { type: "error", message: "hello required before other messages" });
     return;
   }
 
@@ -194,12 +229,12 @@ async function handleMessage(runtime: ServerRuntime, session: Session, message: 
   }
 
   if (message.type === "run") {
-    await handleRun(runtime, session, message);
+    await handleRun(runtime, session, message as unknown as RunMessage);
     return;
   }
 
   if (message.type === "cancel-task") {
-    await handleCancelTask(runtime, session, message);
+    handleCancelTask(runtime, message);
     return;
   }
 
@@ -214,14 +249,14 @@ async function handleMessage(runtime: ServerRuntime, session: Session, message: 
   });
 }
 
-async function handleHello(session: Session, message: Record<string, unknown>, expectedToken: string): Promise<void> {
+async function handleHello(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
   if (typeof message.token !== "string" || typeof message.protocolVersion !== "number") {
     send(session, { type: "error", message: "invalid hello message" });
     session.socket.end();
     return;
   }
 
-  if (message.token !== expectedToken) {
+  if (message.token !== runtime.registrationToken) {
     send(session, { type: "error", message: "token mismatch" });
     session.socket.end();
     return;
@@ -254,32 +289,49 @@ function handleHeartbeat(session: Session, message: Record<string, unknown>): vo
   });
 }
 
-async function handleRun(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
-  if (typeof message.requestId !== "string" || typeof message.cwd !== "string" || !Array.isArray(message.argv)) {
+async function handleRun(runtime: ServerRuntime, session: Session, message: RunMessage): Promise<void> {
+  if (
+    typeof message.requestId !== "string" ||
+    typeof message.cwd !== "string" ||
+    !Array.isArray(message.argv) ||
+    message.argv.length === 0 ||
+    message.argv.some((entry) => typeof entry !== "string")
+  ) {
     send(session, { type: "error", requestId: asRequestId(message.requestId), message: "invalid run message" });
     return;
   }
 
-  const argv = message.argv.filter((entry): entry is string => typeof entry === "string");
-  if (argv.length !== message.argv.length || argv.length === 0) {
-    send(session, { type: "error", requestId: message.requestId, message: "invalid argv" });
-    return;
-  }
-
-  const serialMode = message.serialMode === "by-cwd" ? "by-cwd" : "global";
-  const mergeMode: TaskMergeMode = message.mergeMode === "global" || message.mergeMode === "off" ? message.mergeMode : "by-cwd";
   const cwd = await normalizeCwd(message.cwd);
-
+  const mergeMode: TaskMergeMode = message.mergeMode === "global" || message.mergeMode === "off" ? message.mergeMode : "by-cwd";
+  const serialMode = message.serialMode === "by-cwd" ? "by-cwd" : "global";
   const result = runtime.taskManager.createOrAttach({
     cwd,
-    argv,
+    argv: message.argv,
     mergeMode,
   });
 
-  const snapshot = runtime.taskManager.listTasks().find((task) => task.taskId === result.taskId);
+  const snapshot = findTask(runtime, result.taskId);
   if (!snapshot) {
     send(session, { type: "error", requestId: message.requestId, message: "task unavailable" });
     return;
+  }
+
+  let taskState = runtime.taskStates.get(result.taskId);
+  if (!taskState) {
+    taskState = {
+      taskId: result.taskId,
+      serialMode,
+      mergeMode,
+      serialKey: serialMode === "global" ? "__global__" : cwd,
+      controller: new AbortController(),
+      buffer: new OutputBuffer(runtime.maxBufferedOutputBytes),
+      terminalEventSent: false,
+    };
+    runtime.taskStates.set(result.taskId, taskState);
+
+    const schedulerTask = toSchedulerTask(taskState);
+    runtime.scheduler.enqueue(schedulerTask);
+    enqueueLaneTask(runtime, taskState);
   }
 
   session.subscriptions.set(result.taskId, result.subscriberId);
@@ -293,57 +345,42 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: Reco
     merged: result.merged,
   });
 
-  const serialKey = serialMode === "global" ? "__global__" : cwd;
-  const taskLike = {
-    taskId: result.taskId,
-    serialMode,
-    mergeMode,
-    serialKey,
-  } as const;
-
-  runtime.runs.set(result.taskId, {
-    taskId: result.taskId,
-    serialMode,
-    mergeMode,
-    serialKey,
-    controller: new AbortController(),
-    terminalEventSent: false,
-  });
-
-  if (snapshot.status === "queued" && runtime.scheduler.nextRunnableFor(taskLike)?.taskId !== result.taskId) {
-    maybeSendQueuedPrompt(runtime, result.taskId, snapshot);
+  if (result.merged) {
+    replayBufferedOutput(session, result.taskId, taskState.buffer);
   }
 
-  drainScheduler(runtime, taskLike);
+  if (snapshot.status === "queued") {
+    const queuePosition = queuePositionFor(runtime, result.taskId);
+    if (queuePosition !== undefined && queuePosition > 1) {
+      sendTaskEvent(session, result.taskId, { type: "queued", position: queuePosition });
+    }
+  }
+
+  drainScheduler(runtime, toSchedulerTask(taskState));
+  refreshIdleTimer(runtime);
 }
 
-async function handleCancelTask(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
+function handleCancelTask(runtime: ServerRuntime, message: Record<string, unknown>): void {
   if (typeof message.taskId !== "string") {
-    send(session, { type: "error", message: "invalid cancel-task message" });
     return;
   }
 
-  const runState = runtime.runs.get(message.taskId);
-  const canceled = runtime.taskManager.cancelTask(message.taskId);
-
+  const taskId = message.taskId;
+  const taskState = runtime.taskStates.get(taskId);
+  const canceled = runtime.taskManager.cancelTask(taskId);
   if (!canceled) {
-    send(session, { type: "error", message: "task not found or not cancellable" });
     return;
   }
 
-  if (runState) {
-    runState.controller.abort();
-    if (!runState.terminalEventSent) {
-      broadcastTaskEvent(runtime, message.taskId, "cancelled");
-      runState.terminalEventSent = true;
-    }
+  if (taskState) {
+    taskState.controller.abort();
+    emitCancelled(runtime, taskState);
+    drainScheduler(runtime, toSchedulerTask(taskState));
   } else {
-    broadcastTaskEvent(runtime, message.taskId, "cancelled");
+    broadcastTaskEvent(runtime, taskId, { type: "cancelled" });
   }
 
-  if (runState) {
-    drainScheduler(runtime, runState);
-  }
+  refreshIdleTimer(runtime);
 }
 
 function handlePs(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
@@ -352,93 +389,199 @@ function handlePs(runtime: ServerRuntime, session: Session, message: Record<stri
     return;
   }
 
+  const tasks = runtime.taskManager.listActiveTasks().map((task) => toPsTask(runtime, task));
   send(session, {
     type: "ps-result",
     requestId: message.requestId,
-    tasks: runtime.taskManager.listActiveTasks().map((task) => ({ taskId: task.taskId })),
+    tasks,
   });
 }
 
 async function detachSession(runtime: ServerRuntime, session: Session): Promise<void> {
   for (const [taskId, subscriberId] of session.subscriptions) {
     session.subscriptions.delete(taskId);
+    session.replays.delete(taskId);
     removeTaskSession(runtime, taskId, session);
 
-    const runState = runtime.runs.get(taskId);
     const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId);
     if (!detached) {
       continue;
     }
 
-    const snapshot = runtime.taskManager.listTasks().find((task) => task.taskId === taskId);
-    if (snapshot?.status === "canceled") {
-      runState?.controller.abort();
-      if (!runState) {
-        broadcastTaskEvent(runtime, taskId, "cancelled");
-      }
+    const taskState = runtime.taskStates.get(taskId);
+    const snapshot = findTask(runtime, taskId);
+    if (snapshot?.status === "canceled" && taskState) {
+      taskState.controller.abort();
+      emitCancelled(runtime, taskState);
+      drainScheduler(runtime, toSchedulerTask(taskState));
     }
   }
 }
 
 async function startTask(runtime: ServerRuntime, taskId: string): Promise<void> {
-  const runState = runtime.runs.get(taskId);
-  if (!runState) {
+  if (runtime.stopped) {
     return;
   }
 
-  const snapshot = runtime.taskManager.listTasks().find((task) => task.taskId === taskId);
+  const taskState = runtime.taskStates.get(taskId);
+  if (!taskState) {
+    return;
+  }
+
+  const snapshot = findTask(runtime, taskId);
   if (!snapshot) {
-    runtime.scheduler.markFinished(taskId);
-    runtime.runs.delete(taskId);
+    finalizeTask(runtime, taskId);
     return;
   }
 
   if (!runtime.taskManager.markTaskRunning(taskId)) {
-    runtime.scheduler.markFinished(taskId);
-    runtime.runs.delete(taskId);
+    finalizeTask(runtime, taskId);
     return;
   }
 
-  broadcastTaskEvent(runtime, taskId, "started");
+  broadcastTaskEvent(runtime, taskId, { type: "started" });
 
   try {
     const result = await runProcess({
       cwd: snapshot.canonicalExecutionCwd,
       argv: snapshot.argv,
-      signal: runState.controller.signal,
+      signal: taskState.controller.signal,
       graceMs: runtime.terminateGraceMs,
+      onStdout(chunk) {
+        appendOutput(runtime, taskId, "stdout", chunk);
+      },
+      onStderr(chunk) {
+        appendOutput(runtime, taskId, "stderr", chunk);
+      },
     });
 
-    const latest = runtime.taskManager.listTasks().find((task) => task.taskId === taskId);
+    const latest = findTask(runtime, taskId);
     if (latest?.status === "canceled") {
-      if (!runState.terminalEventSent) {
-        broadcastTaskEvent(runtime, taskId, "cancelled");
-        runState.terminalEventSent = true;
-      }
+      emitCancelled(runtime, taskState);
     } else {
       runtime.taskManager.markTaskFinished(taskId);
-      broadcastTaskEvent(runtime, taskId, "exited");
+      broadcastTaskEvent(runtime, taskId, {
+        type: "exited",
+        code: result.code,
+        signal: result.signal,
+      });
     }
-
-    runtime.scheduler.markFinished(taskId);
   } finally {
-    runtime.runs.delete(taskId);
-    drainScheduler(runtime, runState);
+    finalizeTask(runtime, taskId);
+    refreshIdleTimer(runtime);
   }
 }
 
-function drainScheduler(runtime: ServerRuntime, taskLike: { serialMode: "global" | "by-cwd"; mergeMode: TaskMergeMode; serialKey: string }): void {
+function appendOutput(runtime: ServerRuntime, taskId: string, stream: "stdout" | "stderr", data: string): void {
+  const taskState = runtime.taskStates.get(taskId);
+  if (!taskState) {
+    return;
+  }
+
+  const chunk = taskState.buffer.append(stream, data);
+  broadcastOutputChunk(runtime, taskId, chunk);
+}
+
+function replayBufferedOutput(session: Session, taskId: string, buffer: OutputBuffer): void {
+  const lastSeq = buffer.lastSeq();
+  if (lastSeq === 0) {
+    return;
+  }
+
+  session.replays.set(taskId, {
+    lastSeq,
+    pending: [],
+  });
+
+  for (const chunk of buffer.snapshotUntil(lastSeq)) {
+    sendTaskEvent(session, taskId, chunkToEvent(chunk, true));
+  }
+
+  const replay = session.replays.get(taskId);
+  if (!replay) {
+    return;
+  }
+
+  for (const pending of replay.pending) {
+    send(session, pending);
+  }
+
+  session.replays.delete(taskId);
+}
+
+function broadcastOutputChunk(runtime: ServerRuntime, taskId: string, chunk: OutputChunk): void {
+  const sessions = runtime.taskSessions.get(taskId);
+  if (!sessions) {
+    return;
+  }
+
+  for (const session of sessions) {
+    const replay = session.replays.get(taskId);
+    const message: ServerToClient = {
+      type: "task-event",
+      taskId,
+      event: chunkToEvent(chunk, false),
+    };
+
+    if (replay) {
+      if (chunk.seq <= replay.lastSeq) {
+        continue;
+      }
+
+      replay.pending.push(message);
+      continue;
+    }
+
+    send(session, message);
+  }
+}
+
+function chunkToEvent(chunk: OutputChunk, replay: boolean): TaskEvent {
+  return {
+    type: chunk.stream,
+    data: chunk.data,
+    seq: chunk.seq,
+    replay,
+  };
+}
+
+function emitCancelled(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
+  if (taskState.terminalEventSent) {
+    return;
+  }
+
+  taskState.terminalEventSent = true;
+  broadcastTaskEvent(runtime, taskState.taskId, { type: "cancelled" });
+}
+
+function finalizeTask(runtime: ServerRuntime, taskId: string): void {
+  const taskState = runtime.taskStates.get(taskId);
+  if (!taskState) {
+    return;
+  }
+
+  runtime.scheduler.markFinished(taskId);
+  dequeueLaneTask(runtime, taskState);
+  runtime.taskStates.delete(taskId);
+  if (!runtime.stopped) {
+    drainScheduler(runtime, toSchedulerTask(taskState));
+  }
+}
+
+function drainScheduler(runtime: ServerRuntime, taskLike: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): void {
+  if (runtime.stopped) {
+    return;
+  }
+
   while (true) {
     const next = runtime.scheduler.nextRunnableFor(taskLike);
     if (!next) {
       return;
     }
 
-    const snapshot = runtime.taskManager.listTasks().find((task) => task.taskId === next.taskId);
+    const snapshot = findTask(runtime, next.taskId);
     if (snapshot?.status === "canceled") {
-      if (runtime.scheduler.markRunning(next.taskId)) {
-        runtime.scheduler.markFinished(next.taskId);
-      }
+      finalizeTask(runtime, next.taskId);
       continue;
     }
 
@@ -451,19 +594,105 @@ function drainScheduler(runtime: ServerRuntime, taskLike: { serialMode: "global"
   }
 }
 
-function maybeSendQueuedPrompt(runtime: ServerRuntime, taskId: string, snapshot: { taskId: string }): void {
-  const sessions = runtime.taskSessions.get(taskId);
-  if (!sessions || sessions.size === 0) {
+function refreshIdleTimer(runtime: ServerRuntime): void {
+  if (runtime.idleTimeoutMs === null) {
     return;
   }
 
-  for (const session of sessions) {
-    send(session, {
-      type: "task-event",
-      taskId: snapshot.taskId,
-      event: "queued",
-    });
+  const idle = runtime.sessions.size === 0 && runtime.taskManager.listActiveTasks().length === 0;
+  if (!idle) {
+    clearIdleTimer(runtime);
+    return;
   }
+
+  if (runtime.idleTimer !== null) {
+    return;
+  }
+
+  runtime.idleTimer = setTimeout(() => {
+    runtime.idleTimer = null;
+    void runtime.stopServer?.();
+  }, runtime.idleTimeoutMs);
+}
+
+function clearIdleTimer(runtime: ServerRuntime): void {
+  if (runtime.idleTimer === null) {
+    return;
+  }
+
+  clearTimeout(runtime.idleTimer);
+  runtime.idleTimer = null;
+}
+
+function findTask(runtime: ServerRuntime, taskId: string): TaskSnapshot | undefined {
+  return runtime.taskManager.listTasks().find((task) => task.taskId === taskId);
+}
+
+function toSchedulerTask(taskState: TaskRuntimeState): SchedulerTask {
+  return {
+    taskId: taskState.taskId,
+    serialMode: taskState.serialMode,
+    mergeMode: taskState.mergeMode,
+    serialKey: taskState.serialKey,
+  };
+}
+
+function toPsTask(runtime: ServerRuntime, task: TaskSnapshot): PsTask {
+  const queuePosition = task.status === "queued" ? queuePositionFor(runtime, task.taskId) : undefined;
+
+  return {
+    taskId: task.taskId,
+    status: task.status,
+    cwd: task.canonicalExecutionCwd,
+    argv: task.argv,
+    subscriberCount: task.subscriberCount,
+    merged: task.subscriberCount > 1,
+    ...(queuePosition !== undefined ? { queuePosition } : {}),
+  };
+}
+
+function queuePositionFor(runtime: ServerRuntime, taskId: string): number | undefined {
+  for (const taskIds of runtime.laneQueues.values()) {
+    const index = taskIds.indexOf(taskId);
+    if (index !== -1) {
+      return index + 1;
+    }
+  }
+
+  return undefined;
+}
+
+function enqueueLaneTask(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
+  const laneKey = resolveLaneKey(taskState);
+  const taskIds = runtime.laneQueues.get(laneKey) ?? [];
+  taskIds.push(taskState.taskId);
+  runtime.laneQueues.set(laneKey, taskIds);
+}
+
+function dequeueLaneTask(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
+  const laneKey = resolveLaneKey(taskState);
+  const taskIds = runtime.laneQueues.get(laneKey);
+  if (!taskIds) {
+    return;
+  }
+
+  const index = taskIds.indexOf(taskState.taskId);
+  if (index === -1) {
+    return;
+  }
+
+  taskIds.splice(index, 1);
+  if (taskIds.length === 0) {
+    runtime.laneQueues.delete(laneKey);
+  }
+}
+
+function resolveLaneKey(taskState: Pick<TaskRuntimeState, "serialMode" | "mergeMode" | "serialKey">): string {
+  if (taskState.mergeMode === "global" || taskState.serialMode === "global") {
+    return "global";
+  }
+
+  return taskState.serialKey;
 }
 
 function addTaskSession(runtime: ServerRuntime, taskId: string, session: Session): void {
@@ -484,19 +713,23 @@ function removeTaskSession(runtime: ServerRuntime, taskId: string, session: Sess
   }
 }
 
-function broadcastTaskEvent(runtime: ServerRuntime, taskId: string, event: string): void {
+function broadcastTaskEvent(runtime: ServerRuntime, taskId: string, event: TaskEvent): void {
   const sessions = runtime.taskSessions.get(taskId);
   if (!sessions) {
     return;
   }
 
   for (const session of sessions) {
-    send(session, {
-      type: "task-event",
-      taskId,
-      event,
-    });
+    sendTaskEvent(session, taskId, event);
   }
+}
+
+function sendTaskEvent(session: Session, taskId: string, event: TaskEvent): void {
+  send(session, {
+    type: "task-event",
+    taskId,
+    event,
+  });
 }
 
 function send(session: Session, message: ServerToClient): void {

@@ -1,10 +1,37 @@
 export const protocolVersion = 1;
 export type ProtocolVersion = typeof protocolVersion;
 
-export type TaskEventName = string;
+export type TaskEvent =
+  | {
+      type: "queued";
+      position: number;
+    }
+  | {
+      type: "started";
+    }
+  | {
+      type: "stdout" | "stderr";
+      data: string;
+      seq: number;
+      replay: boolean;
+    }
+  | {
+      type: "cancelled";
+    }
+  | {
+      type: "exited";
+      code: number | null;
+      signal: string | null;
+    };
 
 export type PsTask = {
   taskId: string;
+  status: "queued" | "running";
+  cwd: string;
+  argv: string[];
+  subscriberCount: number;
+  merged: boolean;
+  queuePosition?: number;
 };
 
 export type HelloMessage = {
@@ -55,7 +82,7 @@ export type AcceptedMessage = {
 export type TaskEventMessage = {
   type: "task-event";
   taskId: string;
-  event: TaskEventName;
+  event: TaskEvent;
 };
 
 export type PsResultMessage = {

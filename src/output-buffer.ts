@@ -16,7 +16,7 @@ export class OutputBuffer {
     this.maxBufferedOutputBytes = maxBufferedOutputBytes;
   }
 
-  append(stream: OutputStreamName, data: string): void {
+  append(stream: OutputStreamName, data: string): OutputChunk {
     const chunk: OutputChunk = {
       seq: this.nextSeq++,
       stream,
@@ -26,6 +26,7 @@ export class OutputBuffer {
     this.chunks.push(chunk);
     this.bufferedBytes += Buffer.byteLength(data);
     this.trimToBudget();
+    return { ...chunk };
   }
 
   lastSeq(): number {

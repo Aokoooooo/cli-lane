@@ -27,6 +27,32 @@ type ServerSession = {
   close: () => Promise<void>;
 };
 
+async function nextMessageWithin(session: ServerSession, timeoutMs = 1_000): Promise<unknown> {
+  return await Promise.race([
+    session.nextMessage(),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+async function waitForMessage(
+  session: ServerSession,
+  predicate: (message: unknown) => boolean,
+  timeoutMs = 1_500,
+): Promise<unknown> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const message = await nextMessageWithin(session, Math.max(1, deadline - Date.now()));
+    if (predicate(message)) {
+      return message;
+    }
+  }
+
+  throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
 async function connectToServer(port: number): Promise<ServerSession> {
   const socket = createConnection({ host: "127.0.0.1", port });
   const queue: unknown[] = [];
@@ -74,6 +100,11 @@ async function connectToServer(port: number): Promise<ServerSession> {
       return new Promise<void>((resolve) => {
         socket.once("close", () => resolve());
         socket.end();
+        setTimeout(() => {
+          if (!socket.destroyed) {
+            socket.destroy();
+          }
+        }, 25);
       });
     },
   };
@@ -309,7 +340,6 @@ test("handshakes hello and heartbeat over TCP", async () => {
       serverTime: expect.any(Number),
     });
 
-    await session.close();
   } finally {
     await server.stop();
   }
@@ -357,13 +387,20 @@ test("accepts run requests and surfaces active work in ps", async () => {
       tasks: [
         {
           taskId: (accepted as { taskId: string }).taskId,
+          status: "running",
+          cwd: process.cwd(),
+          argv: ["bun", "-e", "setTimeout(() => process.exit(0), 50);"],
+          subscriberCount: 1,
+          merged: false,
         },
       ],
     });
     expect(messages).toContainEqual({
       type: "task-event",
       taskId: (accepted as { taskId: string }).taskId,
-      event: expect.any(String),
+      event: {
+        type: "started",
+      },
     });
 
     await session.close();
@@ -416,7 +453,9 @@ test("cancels a running task through cancel-task", async () => {
     expect(started).toEqual({
       type: "task-event",
       taskId: (accepted as { taskId: string }).taskId,
-      event: expect.any(String),
+      event: {
+        type: "started",
+      },
     });
 
     session.send({
@@ -428,11 +467,274 @@ test("cancels a running task through cancel-task", async () => {
     expect(cancelled).toEqual({
       type: "task-event",
       taskId: (accepted as { taskId: string }).taskId,
-      event: "cancelled",
+      event: {
+        type: "cancelled",
+      },
     });
 
     await session.close();
   } finally {
     await server.stop();
   }
+});
+
+test("replays buffered output to a late-joining merged subscriber", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir });
+
+  try {
+    const sessionA = await connectToServer(server.port);
+    sessionA.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionA);
+
+    sessionA.send({
+      type: "run",
+      requestId: "req-a",
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        [
+          "process.stdout.write('first\\n');",
+          "setTimeout(() => process.stderr.write('err\\n'), 30);",
+          "setTimeout(() => process.stdout.write('second\\n'), 60);",
+          "setTimeout(() => process.exit(0), 90);",
+        ].join(""),
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const acceptedA = await nextMessageWithin(sessionA);
+    expect(acceptedA).toEqual({
+      type: "accepted",
+      requestId: "req-a",
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
+    });
+
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string; data?: string } }).event === "object" &&
+        (message as { event: { type?: string; data?: string } }).event.type === "stdout" &&
+        (message as { event: { data?: string } }).event.data === "first\n",
+    );
+
+    const sessionB = await connectToServer(server.port);
+    sessionB.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionB);
+
+    sessionB.send({
+      type: "run",
+      requestId: "req-b",
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        [
+          "process.stdout.write('first\\n');",
+          "setTimeout(() => process.stderr.write('err\\n'), 30);",
+          "setTimeout(() => process.stdout.write('second\\n'), 60);",
+          "setTimeout(() => process.exit(0), 90);",
+        ].join(""),
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const acceptedB = await nextMessageWithin(sessionB);
+    expect(acceptedB).toEqual({
+      type: "accepted",
+      requestId: "req-b",
+      taskId: (acceptedA as { taskId: string }).taskId,
+      subscriberId: expect.any(String),
+      merged: true,
+    });
+
+    expect(
+      await waitForMessage(
+        sessionB,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "task-event" &&
+          typeof (message as { event?: { type?: string; data?: string; replay?: boolean } }).event === "object" &&
+          (message as { event: { type?: string; data?: string; replay?: boolean } }).event.type === "stdout" &&
+          (message as { event: { data?: string; replay?: boolean } }).event.data === "first\n" &&
+          (message as { event: { replay?: boolean } }).event.replay === true,
+      ),
+    ).toEqual({
+      type: "task-event",
+      taskId: (acceptedA as { taskId: string }).taskId,
+      event: {
+        type: "stdout",
+        data: "first\n",
+        replay: true,
+        seq: 1,
+      },
+    });
+
+    expect(
+      await waitForMessage(
+        sessionB,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "task-event" &&
+          typeof (message as { event?: { type?: string; data?: string } }).event === "object" &&
+          (message as { event: { type?: string; data?: string } }).event.type === "stderr" &&
+          (message as { event: { data?: string } }).event.data === "err\n",
+      ),
+    ).toEqual({
+      type: "task-event",
+      taskId: (acceptedA as { taskId: string }).taskId,
+      event: {
+        type: "stderr",
+        data: "err\n",
+        replay: false,
+        seq: 2,
+      },
+    });
+
+    await sessionA.close();
+    await sessionB.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("ps returns rich task summaries including queue position", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir });
+
+  try {
+    const session = await connectToServer(server.port);
+    session.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(session);
+
+    session.send({
+      type: "run",
+      requestId: "req-running",
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 200);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+    const runningAccepted = await nextMessageWithin(session);
+    await waitForMessage(
+      session,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string } }).event === "object" &&
+        (message as { event: { type?: string } }).event.type === "started",
+    );
+
+    session.send({
+      type: "run",
+      requestId: "req-queued",
+      cwd: process.cwd(),
+      argv: [
+        "bun",
+        "-e",
+        "setTimeout(() => process.exit(0), 50);",
+      ],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+    const queuedAccepted = await nextMessageWithin(session);
+    await waitForMessage(
+      session,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string; position?: number } }).event === "object" &&
+        (message as { event: { type?: string; position?: number } }).event.type === "queued" &&
+        (message as { event: { position?: number } }).event.position === 2,
+    );
+
+    session.send({ type: "ps", requestId: "ps-rich" });
+
+    expect(
+      await waitForMessage(
+        session,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "ps-result" &&
+          (message as { requestId?: string }).requestId === "ps-rich",
+      ),
+    ).toEqual({
+      type: "ps-result",
+      requestId: "ps-rich",
+      tasks: [
+        {
+          taskId: (runningAccepted as { taskId: string }).taskId,
+          status: "running",
+          cwd: process.cwd(),
+          argv: ["bun", "-e", "setTimeout(() => process.exit(0), 200);"],
+          subscriberCount: 1,
+          merged: false,
+        },
+        {
+          taskId: (queuedAccepted as { taskId: string }).taskId,
+          status: "queued",
+          cwd: process.cwd(),
+          argv: ["bun", "-e", "setTimeout(() => process.exit(0), 50);"],
+          subscriberCount: 1,
+          merged: false,
+          queuePosition: 2,
+        },
+      ],
+    });
+
+    await session.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("shuts itself down after the idle timeout and cleans registration", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir, idleTimeoutMs: 50 });
+
+  expect(await readRegistration(server.registrationPath)).toEqual(server.registration);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  expect(await readRegistration(server.registrationPath)).toBeNull();
+  await expect(connectToServer(server.port)).rejects.toThrow();
+  await server.stop();
 });
