@@ -14,12 +14,21 @@ export class Scheduler {
   private readonly lanes = new Map<string, LaneState>();
   private readonly tasks = new Map<string, { task: SchedulerTask; laneKey: string }>();
 
-  enqueue(task: SchedulerTask): void {
+  enqueue(task: SchedulerTask): boolean {
+    if (this.tasks.has(task.taskId)) {
+      return false;
+    }
+
     const laneKey = this.resolveLaneKey(task);
     const lane = this.getLane(laneKey);
 
     lane.queue.push(task);
     this.tasks.set(task.taskId, { task, laneKey });
+    return true;
+  }
+
+  nextRunnableFor(taskLike: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): SchedulerTask | undefined {
+    return this.nextRunnable(this.resolveLaneKey(taskLike));
   }
 
   nextRunnable(serialKey: string): SchedulerTask | undefined {
@@ -32,58 +41,47 @@ export class Scheduler {
     return lane.queue[0];
   }
 
-  markRunning(taskId: string): void {
+  markRunning(taskId: string): boolean {
     const entry = this.tasks.get(taskId);
 
     if (!entry) {
-      return;
+      return false;
     }
 
     const lane = this.lanes.get(entry.laneKey);
 
     if (!lane || lane.runningTaskId || lane.queue[0]?.taskId !== taskId) {
-      return;
+      return false;
     }
 
     lane.runningTaskId = taskId;
+    return true;
   }
 
-  markFinished(taskId: string): void {
+  markFinished(taskId: string): boolean {
     const entry = this.tasks.get(taskId);
 
     if (!entry) {
-      return;
+      return false;
     }
 
     const lane = this.lanes.get(entry.laneKey);
 
     if (!lane) {
-      this.tasks.delete(taskId);
-      return;
+      return false;
     }
 
-    if (lane.runningTaskId === taskId) {
-      lane.queue.shift();
-      lane.runningTaskId = undefined;
-      this.tasks.delete(taskId);
-      return;
+    if (lane.runningTaskId !== taskId || lane.queue[0]?.taskId !== taskId) {
+      return false;
     }
 
-    if (lane.queue[0]?.taskId === taskId) {
-      lane.queue.shift();
-      this.tasks.delete(taskId);
-      return;
-    }
-
-    const index = lane.queue.findIndex((task) => task.taskId === taskId);
-
-    if (index >= 0) {
-      lane.queue.splice(index, 1);
-      this.tasks.delete(taskId);
-    }
+    lane.queue.shift();
+    lane.runningTaskId = undefined;
+    this.tasks.delete(taskId);
+    return true;
   }
 
-  private resolveLaneKey(task: SchedulerTask): string {
+  private resolveLaneKey(task: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): string {
     if (task.mergeMode === "global" || task.serialMode === "global") {
       return "global";
     }
