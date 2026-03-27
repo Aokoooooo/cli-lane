@@ -738,3 +738,202 @@ test("shuts itself down after the idle timeout and cleans registration", async (
   await expect(connectToServer(server.port)).rejects.toThrow();
   await server.stop();
 });
+
+test("cancel-subscription detaches only the targeted subscriber", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir, terminateGraceMs: 50 });
+
+  try {
+    const sessionA = await connectToServer(server.port);
+    sessionA.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionA);
+
+    sessionA.send({
+      type: "run",
+      requestId: "req-a",
+      cwd: process.cwd(),
+      argv: ["bun", "-e", "setInterval(() => {}, 1000);"],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const acceptedA = await nextMessageWithin(sessionA) as {
+      taskId: string;
+      subscriberId: string;
+    };
+
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string } }).event === "object" &&
+        (message as { event: { type?: string } }).event.type === "started",
+    );
+
+    const sessionB = await connectToServer(server.port);
+    sessionB.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionB);
+
+    sessionB.send({
+      type: "run",
+      requestId: "req-b",
+      cwd: process.cwd(),
+      argv: ["bun", "-e", "setInterval(() => {}, 1000);"],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const acceptedB = await nextMessageWithin(sessionB) as {
+      taskId: string;
+      subscriberId: string;
+    };
+
+    expect(acceptedB.taskId).toBe(acceptedA.taskId);
+
+    sessionB.send({
+      type: "cancel-subscription",
+      taskId: acceptedB.taskId,
+      subscriberId: acceptedB.subscriberId,
+    });
+
+    sessionA.send({ type: "ps", requestId: "ps-still-running" });
+    expect(
+      await waitForMessage(
+        sessionA,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "ps-result" &&
+          (message as { requestId?: string }).requestId === "ps-still-running",
+      ),
+    ).toEqual({
+      type: "ps-result",
+      requestId: "ps-still-running",
+      tasks: [
+        {
+          taskId: acceptedA.taskId,
+          status: "running",
+          cwd: process.cwd(),
+          argv: ["bun", "-e", "setInterval(() => {}, 1000);"],
+          subscriberCount: 1,
+          merged: false,
+        },
+      ],
+    });
+
+    sessionA.send({
+      type: "cancel-subscription",
+      taskId: acceptedA.taskId,
+      subscriberId: acceptedA.subscriberId,
+    });
+
+    expect(
+      await waitForMessage(
+        sessionA,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "task-event" &&
+          typeof (message as { event?: { type?: string } }).event === "object" &&
+          (message as { event: { type?: string } }).event.type === "cancelled",
+      ),
+    ).toEqual({
+      type: "task-event",
+      taskId: acceptedA.taskId,
+      event: {
+        type: "cancelled",
+      },
+    });
+
+    await sessionA.close();
+    await sessionB.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("missed heartbeats detach the attached subscriber and auto-cancel the task", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    idleTimeoutMs: 5_000,
+    heartbeatTimeoutMs: 80,
+  } as Parameters<typeof startServer>[0]);
+
+  try {
+    const session = await connectToServer(server.port);
+    session.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(session);
+
+    session.send({
+      type: "run",
+      requestId: "req-heartbeat",
+      cwd: process.cwd(),
+      argv: ["bun", "-e", "setInterval(() => {}, 1000);"],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    const accepted = await nextMessageWithin(session) as { taskId: string };
+    await waitForMessage(
+      session,
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message as { type?: string }).type === "task-event" &&
+        typeof (message as { event?: { type?: string } }).event === "object" &&
+        (message as { event: { type?: string } }).event.type === "started",
+    );
+
+    session.send({ type: "heartbeat", sentAt: 1 });
+    expect(await nextMessageWithin(session)).toEqual({
+      type: "heartbeat-ack",
+      sentAt: 1,
+      serverTime: expect.any(Number),
+    });
+
+    expect(
+      await waitForMessage(
+        session,
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: string }).type === "task-event" &&
+          typeof (message as { event?: { type?: string } }).event === "object" &&
+          (message as { event: { type?: string } }).event.type === "cancelled",
+        1_000,
+      ),
+    ).toEqual({
+      type: "task-event",
+      taskId: accepted.taskId,
+      event: {
+        type: "cancelled",
+      },
+    });
+  } finally {
+    await server.stop();
+  }
+});

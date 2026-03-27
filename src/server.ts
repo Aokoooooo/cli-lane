@@ -23,6 +23,7 @@ export type StartServerOptions = {
   terminateGraceMs?: number;
   idleTimeoutMs?: number;
   maxBufferedOutputBytes?: number;
+  heartbeatTimeoutMs?: number;
 };
 
 export type CoordinatorServer = {
@@ -43,6 +44,7 @@ type Session = {
   authed: boolean;
   subscriptions: Map<string, string>;
   replays: Map<string, ReplayState>;
+  heartbeatTimer: Timer | null;
 };
 
 type TaskRuntimeState = {
@@ -67,6 +69,7 @@ type ServerRuntime = {
   registrationToken: string;
   terminateGraceMs: number;
   idleTimeoutMs: number | null;
+  heartbeatTimeoutMs: number;
   maxBufferedOutputBytes: number;
   idleTimer: Timer | null;
   stopServer: (() => Promise<void>) | null;
@@ -76,6 +79,7 @@ const DEFAULT_SERVER_VERSION = "0.1.0";
 const DEFAULT_TERMINATE_GRACE_MS = 3_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
 
 export async function startServer(options: StartServerOptions): Promise<CoordinatorServer> {
   await mkdir(options.runtimeDir, { recursive: true });
@@ -93,6 +97,7 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     registrationToken: "",
     terminateGraceMs: options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS,
     idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+    heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
     maxBufferedOutputBytes: options.maxBufferedOutputBytes ?? DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
     idleTimer: null,
     stopServer: null,
@@ -109,6 +114,7 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
           authed: false,
           subscriptions: new Map(),
           replays: new Map(),
+          heartbeatTimer: null,
         };
 
         runtime.sessions.add(session);
@@ -224,7 +230,12 @@ async function handleMessage(runtime: ServerRuntime, session: Session, message: 
   }
 
   if (message.type === "heartbeat") {
-    handleHeartbeat(session, message);
+    handleHeartbeat(runtime, session, message);
+    return;
+  }
+
+  if (message.type === "cancel-subscription") {
+    handleCancelSubscription(runtime, session, message);
     return;
   }
 
@@ -269,6 +280,7 @@ async function handleHello(runtime: ServerRuntime, session: Session, message: Re
   }
 
   session.authed = true;
+  refreshHeartbeatTimer(runtime, session);
   send(session, {
     type: "hello-ack",
     serverVersion: DEFAULT_SERVER_VERSION,
@@ -276,17 +288,28 @@ async function handleHello(runtime: ServerRuntime, session: Session, message: Re
   });
 }
 
-function handleHeartbeat(session: Session, message: Record<string, unknown>): void {
+function handleHeartbeat(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
   if (typeof message.sentAt !== "number") {
     send(session, { type: "error", message: "invalid heartbeat message" });
     return;
   }
 
+  refreshHeartbeatTimer(runtime, session);
   send(session, {
     type: "heartbeat-ack",
     sentAt: message.sentAt,
     serverTime: Date.now(),
   });
+}
+
+function handleCancelSubscription(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
+  if (typeof message.taskId !== "string" || typeof message.subscriberId !== "string") {
+    send(session, { type: "error", message: "invalid cancel-subscription message" });
+    return;
+  }
+
+  void detachSubscriber(runtime, session, message.taskId, message.subscriberId, true);
+  refreshIdleTimer(runtime);
 }
 
 async function handleRun(runtime: ServerRuntime, session: Session, message: RunMessage): Promise<void> {
@@ -398,24 +421,79 @@ function handlePs(runtime: ServerRuntime, session: Session, message: Record<stri
 }
 
 async function detachSession(runtime: ServerRuntime, session: Session): Promise<void> {
+  await detachSessionWithMode(runtime, session, false);
+}
+
+async function detachSessionWithMode(
+  runtime: ServerRuntime,
+  session: Session,
+  notifyDetachingSession: boolean,
+): Promise<void> {
+  clearHeartbeatTimer(session);
+
   for (const [taskId, subscriberId] of session.subscriptions) {
-    session.subscriptions.delete(taskId);
-    session.replays.delete(taskId);
+    await detachSubscriber(runtime, session, taskId, subscriberId, notifyDetachingSession);
+  }
+}
+
+async function detachSubscriber(
+  runtime: ServerRuntime,
+  session: Session,
+  taskId: string,
+  subscriberId: string,
+  notifyDetachingSession: boolean,
+): Promise<void> {
+  const expectedSubscriberId = session.subscriptions.get(taskId);
+  if (expectedSubscriberId !== subscriberId) {
+    return;
+  }
+
+  const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId);
+  session.subscriptions.delete(taskId);
+  session.replays.delete(taskId);
+
+  if (!detached) {
     removeTaskSession(runtime, taskId, session);
+    return;
+  }
 
-    const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId);
-    if (!detached) {
-      continue;
-    }
+  const taskState = runtime.taskStates.get(taskId);
+  const snapshot = findTask(runtime, taskId);
 
-    const taskState = runtime.taskStates.get(taskId);
-    const snapshot = findTask(runtime, taskId);
-    if (snapshot?.status === "canceled" && taskState) {
+  if (snapshot?.status === "canceled") {
+    if (taskState) {
       taskState.controller.abort();
+
+      if (notifyDetachingSession && !taskState.terminalEventSent) {
+        sendTaskEvent(session, taskId, { type: "cancelled" });
+      }
+
+      removeTaskSession(runtime, taskId, session);
       emitCancelled(runtime, taskState);
       drainScheduler(runtime, toSchedulerTask(taskState));
+      return;
+    }
+
+    if (notifyDetachingSession) {
+      sendTaskEvent(session, taskId, { type: "cancelled" });
     }
   }
+
+  removeTaskSession(runtime, taskId, session);
+}
+
+async function evictSessionForHeartbeat(runtime: ServerRuntime, session: Session): Promise<void> {
+  if (runtime.stopped || !runtime.sessions.has(session)) {
+    return;
+  }
+
+  await detachSessionWithMode(runtime, session, true);
+  runtime.sessions.delete(session);
+  session.socket.end?.();
+  setTimeout(() => {
+    session.socket.destroy?.();
+  }, 25);
+  refreshIdleTimer(runtime);
 }
 
 async function startTask(runtime: ServerRuntime, taskId: string): Promise<void> {
@@ -613,6 +691,22 @@ function refreshIdleTimer(runtime: ServerRuntime): void {
     runtime.idleTimer = null;
     void runtime.stopServer?.();
   }, runtime.idleTimeoutMs);
+}
+
+function refreshHeartbeatTimer(runtime: ServerRuntime, session: Session): void {
+  clearHeartbeatTimer(session);
+  session.heartbeatTimer = setTimeout(() => {
+    void evictSessionForHeartbeat(runtime, session);
+  }, runtime.heartbeatTimeoutMs);
+}
+
+function clearHeartbeatTimer(session: Session): void {
+  if (session.heartbeatTimer === null) {
+    return;
+  }
+
+  clearTimeout(session.heartbeatTimer);
+  session.heartbeatTimer = null;
 }
 
 function clearIdleTimer(runtime: ServerRuntime): void {
