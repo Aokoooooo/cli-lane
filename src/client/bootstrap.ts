@@ -1,6 +1,11 @@
 import { join } from 'node:path'
 import { protocolVersion, type ServerToClient } from '../protocol'
-import { type Registration, readRegistration } from '../registry'
+import {
+  type Registration,
+  pidExists,
+  readRegistration,
+  removeRegistration,
+} from '../registry'
 import type { CoordinatorServer, StartServerOptions } from '../server'
 import { sleep } from '../timing'
 import type { ClientNotice } from './notices'
@@ -18,7 +23,7 @@ export async function connectOrBootstrap(options: {
   const registrationPath = join(options.runtimeDir, 'registration.json')
   const existing = await readRegistration(registrationPath)
 
-  if (existing) {
+  if (existing && pidExists(existing.pid)) {
     try {
       return await connectToRegistration(
         existing,
@@ -28,10 +33,14 @@ export async function connectOrBootstrap(options: {
         options.onNotice,
       )
     } catch (error) {
-      if (!options.bootstrapIfMissing) {
+      if (!options.bootstrapIfMissing || !isRegistrationConnectionFailure(error)) {
         throw error
       }
+
+      await removeRegistration(registrationPath)
     }
+  } else if (existing) {
+    await removeRegistration(registrationPath)
   } else if (!options.bootstrapIfMissing) {
     throw new Error('coordinator registration not found')
   }
@@ -53,6 +62,20 @@ export async function connectOrBootstrap(options: {
 
 export function isListenFailure(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Failed to listen at')
+}
+
+function isRegistrationConnectionFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const code =
+    'code' in error && typeof error.code === 'string' ? error.code : undefined
+  return (
+    code === 'ECONNREFUSED' ||
+    error.message.includes('Failed to connect') ||
+    error.message === 'client disconnected'
+  )
 }
 
 async function startCoordinatorForRuntime(options: {
@@ -114,6 +137,7 @@ async function startCoordinatorInHelperProcess(
   runtimeDir: string,
 ): Promise<CoordinatorServer> {
   const helperScript = join(process.cwd(), 'src', 'index.ts')
+  const registrationPath = join(runtimeDir, 'registration.json')
   const child = Bun.spawn(
     ['bun', 'run', helperScript, '__server__', runtimeDir],
     {
@@ -123,7 +147,6 @@ async function startCoordinatorInHelperProcess(
     },
   )
 
-  const registrationPath = join(runtimeDir, 'registration.json')
   const registration = await waitForRegistration(registrationPath)
 
   return {

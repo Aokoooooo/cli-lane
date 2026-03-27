@@ -84,6 +84,19 @@ export async function removeRegistration(filePath: string): Promise<void> {
   await rm(filePath, { force: true })
 }
 
+export function pidExists(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false
+  }
+
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return !isProcessMissingError(error)
+  }
+}
+
 export function isStaleRegistration(
   _registration: Registration,
   state: RegistrationHealth,
@@ -363,12 +376,7 @@ function isSameLockOwner(left: StartupLock, right: StartupLock): boolean {
 }
 
 function defaultPidExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
+  return pidExists(pid)
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
@@ -386,5 +394,14 @@ function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
     error !== null &&
     'code' in error &&
     error.code === 'EEXIST'
+  )
+}
+
+function isProcessMissingError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ESRCH'
   )
 }

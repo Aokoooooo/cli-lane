@@ -34,41 +34,45 @@ export async function openSocket(
   }
 
   await new Promise<void>((resolve, reject) => {
-    const socket = (Bun as any).connect({
-      hostname: '127.0.0.1',
-      port,
-      socket: {
-        open(clientSocket: any) {
-          state.socket = clientSocket
-          resolve()
-        },
-        data(_clientSocket: any, chunk: string | Uint8Array) {
-          if (state.closed) {
-            return
-          }
+    try {
+      const socket = (Bun as any).connect({
+        hostname: '127.0.0.1',
+        port,
+        socket: {
+          open(clientSocket: any) {
+            state.socket = clientSocket
+            resolve()
+          },
+          data(_clientSocket: any, chunk: string | Uint8Array) {
+            if (state.closed) {
+              return
+            }
 
-          state.buffer += toUtf8(chunk)
-          const decoded = decodeMessageChunk(state.buffer)
-          state.buffer = decoded.remainder
+            state.buffer += toUtf8(chunk)
+            const decoded = decodeMessageChunk(state.buffer)
+            state.buffer = decoded.remainder
 
-          for (const message of decoded.messages as ServerToClient[]) {
-            handleInboundMessage(state, message)
-          }
+            for (const message of decoded.messages as ServerToClient[]) {
+              handleInboundMessage(state, message)
+            }
+          },
+          close() {
+            state.closed = true
+            clearHeartbeatTimer(state)
+            rejectWaiters(state, new Error('client disconnected'))
+            state.resolveClose?.()
+          },
+          error(_clientSocket: any, error: Error) {
+            reject(error)
+          },
         },
-        close() {
-          state.closed = true
-          clearHeartbeatTimer(state)
-          rejectWaiters(state, new Error('client disconnected'))
-          state.resolveClose?.()
-        },
-        error(_clientSocket: any, error: Error) {
-          reject(error)
-        },
-      },
-    })
+      })
 
-    if (socket && !state.socket) {
-      state.socket = socket
+      if (socket && !state.socket) {
+        state.socket = socket
+      }
+    } catch (error) {
+      reject(error)
     }
   })
 
