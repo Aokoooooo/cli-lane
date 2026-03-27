@@ -169,13 +169,18 @@ async function connectOrBootstrap(options: {
   }
 
   const bootstrappedServer = await options.startCoordinator({ runtimeDir: options.runtimeDir });
-  return await connectToRegistration(
-    bootstrappedServer.registration,
-    bootstrappedServer,
-    options.clientVersion,
-    options.onMessage,
-    options.onNotice,
-  );
+  try {
+    return await connectToRegistration(
+      bootstrappedServer.registration,
+      bootstrappedServer,
+      options.clientVersion,
+      options.onMessage,
+      options.onNotice,
+    );
+  } catch (error) {
+    await bootstrappedServer.stop();
+    throw error;
+  }
 }
 
 async function connectToRegistration(
@@ -186,26 +191,31 @@ async function connectToRegistration(
   onNotice?: (notice: ClientNotice) => void,
 ): Promise<ConnectionState> {
   const state = await openSocket(registration.port, bootstrappedServer, registration);
-  state.onMessage = onMessage;
-  state.onNotice = onNotice;
+  try {
+    state.onMessage = onMessage;
+    state.onNotice = onNotice;
 
-  sendMessage(state, {
-    type: "hello",
-    token: registration.token,
-    protocolVersion,
-    clientVersion,
-  });
+    sendMessage(state, {
+      type: "hello",
+      token: registration.token,
+      protocolVersion,
+      clientVersion,
+    });
 
-  const hello = await waitForMessage(
-    state,
-    (message): message is Extract<ServerToClient, { type: "hello-ack" }> => message.type === "hello-ack",
-  );
+    const hello = await waitForMessage(
+      state,
+      (message): message is Extract<ServerToClient, { type: "hello-ack" }> => message.type === "hello-ack",
+    );
 
-  if (hello.protocolVersion !== protocolVersion) {
-    throw new Error("protocol mismatch");
+    if (hello.protocolVersion !== protocolVersion) {
+      throw new Error("protocol mismatch");
+    }
+
+    return state;
+  } catch (error) {
+    await closeClient(state, { stopBootstrappedServer: false });
+    throw error;
   }
-
-  return state;
 }
 
 async function openSocket(
@@ -416,7 +426,10 @@ async function waitForMessage<T extends ServerToClient>(
   });
 }
 
-async function closeClient(state: ConnectionState): Promise<void> {
+async function closeClient(
+  state: ConnectionState,
+  options: { stopBootstrappedServer?: boolean } = {},
+): Promise<void> {
   if (state.closed) {
     await state.closePromise;
     return;
@@ -436,7 +449,7 @@ async function closeClient(state: ConnectionState): Promise<void> {
     new Promise<void>((resolve) => setTimeout(resolve, 50)),
   ]);
 
-  if (state.bootstrappedServer) {
+  if (options.stopBootstrappedServer !== false && state.bootstrappedServer) {
     await state.bootstrappedServer.stop();
   }
 }

@@ -1463,3 +1463,79 @@ test("createClient surfaces a notice when a task is queued", async () => {
     await server.stop();
   }
 });
+
+test("createClient cleans up socket and bootstrap server on handshake failure", async () => {
+  const runtimeDir = await createTempDir();
+  const originalConnect = Bun.connect;
+  const stopCalls: number[] = [];
+  const socketCalls = {
+    end: 0,
+    close: 0,
+    destroy: 0,
+  };
+  type ConnectionOptions = {
+    socket: {
+      open?: (socket: never) => void;
+      data?: (socket: never, chunk: string | Uint8Array) => void;
+      close?: () => void;
+      error?: (_socket: never, error: Error) => void;
+    };
+  };
+  let connectionOptions: ConnectionOptions | null = null;
+
+  const fakeSocket = {
+    write(chunk: string) {
+      const parsed = JSON.parse(chunk);
+      if (parsed.type === "hello") {
+        queueMicrotask(() => {
+          connectionOptions?.socket.data?.(fakeSocket as never, encodeMessage({
+            type: "hello-ack",
+            serverVersion: "0.1.0",
+            protocolVersion: protocolVersion + 1,
+          }));
+        });
+      }
+    },
+    end() {
+      socketCalls.end += 1;
+    },
+    close() {
+      socketCalls.close += 1;
+    },
+    destroy() {
+      socketCalls.destroy += 1;
+    },
+  } as never;
+
+  Bun.connect = ((options: ConnectionOptions) => {
+    connectionOptions = options;
+    queueMicrotask(() => {
+      options.socket.open?.(fakeSocket);
+    });
+    return fakeSocket;
+  }) as typeof Bun.connect;
+
+  const client = createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    startServer: async (options) => {
+      const server = await startServer(options);
+      const originalStop = server.stop;
+      return {
+        ...server,
+        stop: async () => {
+          stopCalls.push(1);
+          await originalStop();
+        },
+      };
+    },
+  });
+
+  try {
+    await expect(client).rejects.toThrow("protocol mismatch");
+    expect(stopCalls.length).toBe(1);
+    expect(socketCalls.end + socketCalls.close + socketCalls.destroy).toBeGreaterThan(0);
+  } finally {
+    Bun.connect = originalConnect;
+  }
+});
