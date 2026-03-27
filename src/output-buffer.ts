@@ -32,10 +32,16 @@ export class OutputBuffer {
     return this.nextSeq - 1;
   }
 
+  firstRetainedSeq(): number | undefined {
+    return this.chunks[0]?.seq;
+  }
+
   snapshotUntil(seq: number): OutputChunk[] {
-    return this.chunks
-      .filter((chunk) => chunk.seq <= seq)
-      .map((chunk) => ({ ...chunk }));
+    return this.snapshotWhere((chunk) => chunk.seq <= seq);
+  }
+
+  snapshotAfter(seq: number): OutputChunk[] {
+    return this.snapshotWhere((chunk) => chunk.seq > seq);
   }
 
   trimToBudget(): void {
@@ -48,5 +54,9 @@ export class OutputBuffer {
 
       this.bufferedBytes -= Buffer.byteLength(chunk.data);
     }
+  }
+
+  private snapshotWhere(predicate: (chunk: OutputChunk) => boolean): OutputChunk[] {
+    return this.chunks.filter(predicate).map((chunk) => ({ ...chunk }));
   }
 }
