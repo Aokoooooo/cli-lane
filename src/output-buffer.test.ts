@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OutputBuffer } from "../src/output-buffer";
+import { OutputBuffer } from "./output-buffer";
 
 function chunk(seq: number, stream: "stdout" | "stderr", data: string) {
   return {

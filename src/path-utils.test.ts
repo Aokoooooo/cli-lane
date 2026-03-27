@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
-import { normalizeCwd } from "../src/path-utils";
+import { normalizeCwd } from "./path-utils";
 
 test("normalizes cwd consistently", async () => {
   const cwd = await normalizeCwd("./");

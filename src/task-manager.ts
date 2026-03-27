@@ -1,3 +1,5 @@
+import { resolveMergeKey } from "./task-routing";
+
 export type TaskMergeMode = "by-cwd" | "global" | "off";
 export type TaskStatus = "queued" | "running" | "finished" | "canceled";
 export type CancelReason = "auto" | "manual";
@@ -280,16 +282,6 @@ export class TaskManager {
   }
 
   private resolveMergeKey(request: TaskManagerRequest): string | undefined {
-    const argvKey = JSON.stringify(request.argv);
-
-    if (request.mergeMode === "off") {
-      return undefined;
-    }
-
-    if (request.mergeMode === "global") {
-      return `global:${argvKey}`;
-    }
-
-    return `cwd:${request.cwd}:${argvKey}`;
+    return resolveMergeKey(request);
   }
 }

@@ -12,7 +12,7 @@ import {
   writeRegistration,
   type Registration,
   type StartupLock,
-} from "../src/registry";
+} from "./registry";
 
 const tempDirs: string[] = [];
 

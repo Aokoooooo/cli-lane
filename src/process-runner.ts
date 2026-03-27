@@ -1,3 +1,5 @@
+import { sleep } from "./timing";
+
 export type RunProcessOptions = {
   cwd: string;
   argv: string[];
@@ -164,10 +166,4 @@ async function readStream(
 
 function hasExited(proc: Bun.Subprocess): boolean {
   return proc.exitCode !== null || proc.signalCode !== null;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

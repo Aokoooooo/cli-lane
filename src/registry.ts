@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { sleep } from "./timing";
 
 export type Registration = {
   pid: number;
@@ -307,10 +308,6 @@ function defaultPidExists(pid: number): boolean {
   } catch {
     return false;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {

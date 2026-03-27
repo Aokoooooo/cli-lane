@@ -1,3 +1,5 @@
+import { resolveLaneKey } from "./task-routing";
+
 export type SchedulerTask = {
   taskId: string;
   serialMode: "global" | "by-cwd";
@@ -19,7 +21,7 @@ export class Scheduler {
       return false;
     }
 
-    const laneKey = this.resolveLaneKey(task);
+    const laneKey = resolveLaneKey(task);
     const lane = this.getLane(laneKey);
 
     lane.queue.push(task);
@@ -28,7 +30,7 @@ export class Scheduler {
   }
 
   nextRunnableFor(taskLike: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): SchedulerTask | undefined {
-    return this.nextRunnable(this.resolveLaneKey(taskLike));
+    return this.nextRunnable(resolveLaneKey(taskLike));
   }
 
   nextRunnable(serialKey: string): SchedulerTask | undefined {
@@ -80,15 +82,6 @@ export class Scheduler {
     this.tasks.delete(taskId);
     return true;
   }
-
-  private resolveLaneKey(task: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): string {
-    if (task.mergeMode === "global" || task.serialMode === "global") {
-      return "global";
-    }
-
-    return task.serialKey;
-  }
-
   private getLane(laneKey: string): LaneState {
     const existing = this.lanes.get(laneKey);
 

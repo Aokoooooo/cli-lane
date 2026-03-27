@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Scheduler } from "../src/scheduler";
+import { Scheduler } from "./scheduler";
 
 type TaskInput = {
   taskId: string;

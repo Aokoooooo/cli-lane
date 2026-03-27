@@ -1,21 +1,33 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { OutputBuffer, type OutputChunk } from "./output-buffer";
+import { OutputBuffer } from "./output-buffer";
 import { normalizeCwd } from "./path-utils";
 import {
   decodeMessageChunk,
-  encodeMessage,
   protocolVersion,
-  type PsTask,
   type RunMessage,
-  type ServerToClient,
-  type TaskEvent,
 } from "./protocol";
 import { runProcess } from "./process-runner";
 import { acquireStartupLock, removeRegistration, type Registration, writeRegistration } from "./registry";
 import { Scheduler, type SchedulerTask } from "./scheduler";
 import { TaskManager, type TaskMergeMode, type TaskSnapshot } from "./task-manager";
+import {
+  addTaskSession,
+  appendOutput,
+  broadcastTaskEvent,
+  emitCancelled,
+  enqueueLaneTask,
+  finalizeTask,
+  findTaskPsView,
+  queuePositionFor,
+  removeTaskSession,
+  replayBufferedOutput,
+  send,
+  sendTaskEvent,
+} from "./server/output";
+import type { ServerRuntime, Session, TaskRuntimeState } from "./server/types";
+import { normalizeMergeMode, normalizeSerialMode, resolveSerialKey } from "./task-routing";
 
 export type StartServerOptions = {
   runtimeDir: string;
@@ -32,51 +44,6 @@ export type CoordinatorServer = {
   registrationPath: string;
   registration: Registration;
   stop: () => Promise<void>;
-};
-
-type ReplayState = {
-  lastSeq: number;
-  pending: ServerToClient[];
-};
-
-type Session = {
-  socket: any;
-  buffer: string;
-  authed: boolean;
-  closed: boolean;
-  subscriptions: Map<string, string>;
-  replays: Map<string, ReplayState>;
-  heartbeatTimer: Timer | null;
-  handshakeTimer: Timer | null;
-};
-
-type TaskRuntimeState = {
-  taskId: string;
-  serialMode: "global" | "by-cwd";
-  mergeMode: TaskMergeMode;
-  serialKey: string;
-  controller: AbortController;
-  buffer: OutputBuffer;
-  terminalEventSent: boolean;
-};
-
-type ServerRuntime = {
-  taskManager: TaskManager;
-  scheduler: Scheduler;
-  taskStates: Map<string, TaskRuntimeState>;
-  sessions: Set<Session>;
-  taskSessions: Map<string, Set<Session>>;
-  laneQueues: Map<string, string[]>;
-  sessionBySocket: WeakMap<object, Session>;
-  stopped: boolean;
-  registrationToken: string;
-  terminateGraceMs: number;
-  idleTimeoutMs: number | null;
-  heartbeatTimeoutMs: number;
-  maxBufferedOutputBytes: number;
-  idleTimer: Timer | null;
-  stopServer: (() => Promise<void>) | null;
-  handshakeTimeoutMs: number;
 };
 
 const DEFAULT_SERVER_VERSION = "0.1.0";
@@ -355,8 +322,8 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
     return;
   }
 
-  const mergeMode: TaskMergeMode = message.mergeMode === "global" || message.mergeMode === "off" ? message.mergeMode : "by-cwd";
-  const serialMode = message.serialMode === "by-cwd" ? "by-cwd" : "global";
+  const mergeMode: TaskMergeMode = normalizeMergeMode(message.mergeMode);
+  const serialMode = normalizeSerialMode(message.serialMode);
   const result = runtime.taskManager.createOrAttach({
     cwd,
     argv: message.argv,
@@ -375,7 +342,7 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
       taskId: result.taskId,
       serialMode,
       mergeMode,
-      serialKey: serialMode === "global" ? "__global__" : cwd,
+      serialKey: resolveSerialKey(serialMode, cwd),
       controller: new AbortController(),
       buffer: new OutputBuffer(runtime.maxBufferedOutputBytes),
       terminalEventSent: false,
@@ -444,7 +411,7 @@ function handlePs(runtime: ServerRuntime, session: Session, message: Record<stri
     return;
   }
 
-  const tasks = runtime.taskManager.listActiveTasks().map((task) => toPsTask(runtime, task));
+  const tasks = runtime.taskManager.listActiveTasks().map((task) => findTaskPsView(runtime, task));
   send(session, {
     type: "ps-result",
     requestId: message.requestId,
@@ -597,106 +564,10 @@ async function startTask(runtime: ServerRuntime, taskId: string): Promise<void> 
       });
     }
   } finally {
-    finalizeTask(runtime, taskId);
+    finalizeTask(runtime, taskId, (taskLike) => {
+      drainScheduler(runtime, taskLike);
+    });
     refreshIdleTimer(runtime);
-  }
-}
-
-function appendOutput(runtime: ServerRuntime, taskId: string, stream: "stdout" | "stderr", data: string): void {
-  const taskState = runtime.taskStates.get(taskId);
-  if (!taskState) {
-    return;
-  }
-
-  const chunk = taskState.buffer.append(stream, data);
-  broadcastOutputChunk(runtime, taskId, chunk);
-}
-
-function replayBufferedOutput(session: Session, taskId: string, buffer: OutputBuffer): void {
-  const lastSeq = buffer.lastSeq();
-  if (lastSeq === 0) {
-    return;
-  }
-
-  session.replays.set(taskId, {
-    lastSeq,
-    pending: [],
-  });
-
-  for (const chunk of buffer.snapshotUntil(lastSeq)) {
-    sendTaskEvent(session, taskId, chunkToEvent(chunk, true));
-  }
-
-  const replay = session.replays.get(taskId);
-  if (!replay) {
-    return;
-  }
-
-  for (const pending of replay.pending) {
-    send(session, pending);
-  }
-
-  session.replays.delete(taskId);
-}
-
-function broadcastOutputChunk(runtime: ServerRuntime, taskId: string, chunk: OutputChunk): void {
-  const sessions = runtime.taskSessions.get(taskId);
-  if (!sessions) {
-    return;
-  }
-
-  for (const session of sessions) {
-    const replay = session.replays.get(taskId);
-    const message: ServerToClient = {
-      type: "task-event",
-      taskId,
-      event: chunkToEvent(chunk, false),
-    };
-
-    if (replay) {
-      if (chunk.seq <= replay.lastSeq) {
-        continue;
-      }
-
-      replay.pending.push(message);
-      continue;
-    }
-
-    send(session, message);
-  }
-}
-
-function chunkToEvent(chunk: OutputChunk, replay: boolean): TaskEvent {
-  return {
-    type: chunk.stream,
-    data: chunk.data,
-    seq: chunk.seq,
-    ts: chunk.ts,
-    bytes: chunk.bytes,
-    replay,
-  };
-}
-
-function emitCancelled(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
-  if (taskState.terminalEventSent) {
-    return;
-  }
-
-  taskState.terminalEventSent = true;
-  broadcastTaskEvent(runtime, taskState.taskId, { type: "cancelled" });
-}
-
-function finalizeTask(runtime: ServerRuntime, taskId: string): void {
-  const taskState = runtime.taskStates.get(taskId);
-  if (!taskState) {
-    return;
-  }
-
-  runtime.scheduler.markFinished(taskId);
-  dequeueLaneTask(runtime, taskState);
-  runtime.taskStates.delete(taskId);
-  if (!runtime.stopped) {
-    drainScheduler(runtime, toSchedulerTask(taskState));
   }
 }
 
@@ -713,7 +584,9 @@ function drainScheduler(runtime: ServerRuntime, taskLike: Pick<SchedulerTask, "s
 
     const snapshot = findTask(runtime, next.taskId);
     if (snapshot?.status === "canceled") {
-      finalizeTask(runtime, next.taskId);
+      finalizeTask(runtime, next.taskId, (rerunTaskLike) => {
+        drainScheduler(runtime, rerunTaskLike);
+      });
       continue;
     }
 
@@ -809,105 +682,6 @@ function toSchedulerTask(taskState: TaskRuntimeState): SchedulerTask {
     mergeMode: taskState.mergeMode,
     serialKey: taskState.serialKey,
   };
-}
-
-function toPsTask(runtime: ServerRuntime, task: TaskSnapshot): PsTask {
-  const queuePosition = task.status === "queued" ? queuePositionFor(runtime, task.taskId) : undefined;
-
-  return {
-    taskId: task.taskId,
-    status: task.status,
-    cwd: task.canonicalExecutionCwd,
-    argv: task.argv,
-    subscriberCount: task.subscriberCount,
-    merged: task.subscriberCount > 1,
-    ...(queuePosition !== undefined ? { queuePosition } : {}),
-  };
-}
-
-function queuePositionFor(runtime: ServerRuntime, taskId: string): number | undefined {
-  for (const taskIds of runtime.laneQueues.values()) {
-    const index = taskIds.indexOf(taskId);
-    if (index !== -1) {
-      return index + 1;
-    }
-  }
-
-  return undefined;
-}
-
-function enqueueLaneTask(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
-  const laneKey = resolveLaneKey(taskState);
-  const taskIds = runtime.laneQueues.get(laneKey) ?? [];
-  taskIds.push(taskState.taskId);
-  runtime.laneQueues.set(laneKey, taskIds);
-}
-
-function dequeueLaneTask(runtime: ServerRuntime, taskState: TaskRuntimeState): void {
-  const laneKey = resolveLaneKey(taskState);
-  const taskIds = runtime.laneQueues.get(laneKey);
-  if (!taskIds) {
-    return;
-  }
-
-  const index = taskIds.indexOf(taskState.taskId);
-  if (index === -1) {
-    return;
-  }
-
-  taskIds.splice(index, 1);
-  if (taskIds.length === 0) {
-    runtime.laneQueues.delete(laneKey);
-  }
-}
-
-function resolveLaneKey(taskState: Pick<TaskRuntimeState, "serialMode" | "mergeMode" | "serialKey">): string {
-  if (taskState.mergeMode === "global" || taskState.serialMode === "global") {
-    return "global";
-  }
-
-  return taskState.serialKey;
-}
-
-function addTaskSession(runtime: ServerRuntime, taskId: string, session: Session): void {
-  const sessions = runtime.taskSessions.get(taskId) ?? new Set<Session>();
-  sessions.add(session);
-  runtime.taskSessions.set(taskId, sessions);
-}
-
-function removeTaskSession(runtime: ServerRuntime, taskId: string, session: Session): void {
-  const sessions = runtime.taskSessions.get(taskId);
-  if (!sessions) {
-    return;
-  }
-
-  sessions.delete(session);
-  if (sessions.size === 0) {
-    runtime.taskSessions.delete(taskId);
-  }
-}
-
-function broadcastTaskEvent(runtime: ServerRuntime, taskId: string, event: TaskEvent): void {
-  const sessions = runtime.taskSessions.get(taskId);
-  if (!sessions) {
-    return;
-  }
-
-  for (const session of sessions) {
-    sendTaskEvent(session, taskId, event);
-  }
-}
-
-function sendTaskEvent(session: Session, taskId: string, event: TaskEvent): void {
-  send(session, {
-    type: "task-event",
-    taskId,
-    event,
-  });
-}
-
-function send(session: Session, message: ServerToClient): void {
-  session.socket.write(encodeMessage(message));
 }
 
 function toUtf8(chunk: string | Uint8Array): string {

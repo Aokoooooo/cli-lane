@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { TaskManager } from "../src/task-manager";
+import { TaskManager } from "./task-manager";
 
 type RunRequest = {
   cwd: string;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeMessageChunk, decodeMessages, encodeMessage } from "../src/protocol";
+import { decodeMessageChunk, decodeMessages, encodeMessage } from "./protocol";
 
 test("encodes and decodes hello messages", () => {
   const raw = encodeMessage({
