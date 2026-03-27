@@ -13,6 +13,8 @@ export type TaskEvent =
       type: "stdout" | "stderr";
       data: string;
       seq: number;
+      ts: number;
+      bytes: number;
       replay: boolean;
     }
   | {
@@ -77,6 +79,8 @@ export type AcceptedMessage = {
   taskId: string;
   subscriberId: string;
   merged: boolean;
+  executionCwd: string;
+  requestedCwd: string;
 };
 
 export type TaskEventMessage = {

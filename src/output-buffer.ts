@@ -4,6 +4,8 @@ export type OutputChunk = {
   seq: number;
   stream: OutputStreamName;
   data: string;
+  ts: number;
+  bytes: number;
 };
 
 export class OutputBuffer {
@@ -17,14 +19,17 @@ export class OutputBuffer {
   }
 
   append(stream: OutputStreamName, data: string): OutputChunk {
+    const bytes = Buffer.byteLength(data);
     const chunk: OutputChunk = {
       seq: this.nextSeq++,
       stream,
       data,
+      ts: Date.now(),
+      bytes,
     };
 
     this.chunks.push(chunk);
-    this.bufferedBytes += Buffer.byteLength(data);
+    this.bufferedBytes += bytes;
     this.trimToBudget();
     return { ...chunk };
   }
@@ -53,7 +58,7 @@ export class OutputBuffer {
         break;
       }
 
-      this.bufferedBytes -= Buffer.byteLength(chunk.data);
+      this.bufferedBytes -= chunk.bytes;
     }
   }
 

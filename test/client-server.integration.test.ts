@@ -376,6 +376,8 @@ test("accepts run requests and surfaces active work in ps", async () => {
       taskId: expect.any(String),
       subscriberId: expect.any(String),
       merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
     });
 
     session.send({ type: "ps", requestId: "ps-1" });
@@ -447,6 +449,8 @@ test("cancels a running task through cancel-task", async () => {
       taskId: expect.any(String),
       subscriberId: expect.any(String),
       merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
     });
 
     const started = await session.nextMessage();
@@ -517,6 +521,8 @@ test("replays buffered output to a late-joining merged subscriber", async () => 
       taskId: expect.any(String),
       subscriberId: expect.any(String),
       merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
     });
 
     await waitForMessage(
@@ -565,6 +571,8 @@ test("replays buffered output to a late-joining merged subscriber", async () => 
       taskId: (acceptedA as { taskId: string }).taskId,
       subscriberId: expect.any(String),
       merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
     });
 
     expect(
@@ -588,6 +596,8 @@ test("replays buffered output to a late-joining merged subscriber", async () => 
         data: "first\n",
         replay: true,
         seq: 1,
+        ts: expect.any(Number),
+        bytes: Buffer.byteLength("first\n"),
       },
     });
 
@@ -611,7 +621,79 @@ test("replays buffered output to a late-joining merged subscriber", async () => 
         data: "err\n",
         replay: false,
         seq: 2,
+        ts: expect.any(Number),
+        bytes: Buffer.byteLength("err\n"),
       },
+    });
+
+    await sessionA.close();
+    await sessionB.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("accepted message exposes execution cwd and requested cwd for global merges", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir });
+
+  try {
+    const sessionA = await connectToServer(server.port);
+    sessionA.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionA);
+
+    sessionA.send({
+      type: "run",
+      requestId: "req-global-a",
+      cwd: process.cwd(),
+      argv: ["bun", "-e", "setTimeout(() => process.exit(0), 80);"],
+      serialMode: "global",
+      mergeMode: "global",
+    });
+
+    const acceptedA = await nextMessageWithin(sessionA);
+    expect(acceptedA).toEqual({
+      type: "accepted",
+      requestId: "req-global-a",
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+    });
+
+    const otherCwd = join(process.cwd(), "test");
+    const sessionB = await connectToServer(server.port);
+    sessionB.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(sessionB);
+
+    sessionB.send({
+      type: "run",
+      requestId: "req-global-b",
+      cwd: otherCwd,
+      argv: ["bun", "-e", "setTimeout(() => process.exit(0), 80);"],
+      serialMode: "global",
+      mergeMode: "global",
+    });
+
+    expect(await nextMessageWithin(sessionB)).toEqual({
+      type: "accepted",
+      requestId: "req-global-b",
+      taskId: (acceptedA as { taskId: string }).taskId,
+      subscriberId: expect.any(String),
+      merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: otherCwd,
     });
 
     await sessionA.close();

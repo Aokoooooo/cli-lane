@@ -366,6 +366,8 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
     taskId: result.taskId,
     subscriberId: result.subscriberId,
     merged: result.merged,
+    executionCwd: snapshot.canonicalExecutionCwd,
+    requestedCwd: cwd,
   });
 
   if (result.merged) {
@@ -619,6 +621,8 @@ function chunkToEvent(chunk: OutputChunk, replay: boolean): TaskEvent {
     type: chunk.stream,
     data: chunk.data,
     seq: chunk.seq,
+    ts: chunk.ts,
+    bytes: chunk.bytes,
     replay,
   };
 }
