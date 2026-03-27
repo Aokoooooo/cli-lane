@@ -329,3 +329,63 @@ test("stale owner cleanup must not delete a newer lock", async () => {
   );
   expect(newOwner).toEqual(createLock({ acquiredAt: 200, ownerId: "fresh-owner" }));
 });
+
+test("stale guard recovery allows lock takeover to proceed", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "locks", "startup.lock");
+  const guardPath = `${filePath}.guard`;
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(createLock({ pid: 999_999, ownerId: "stale-lock" })), "utf8");
+  await writeFile(
+    guardPath,
+    JSON.stringify(createLock({ pid: 999_999, acquiredAt: 0, ownerId: "stale-guard" })),
+    "utf8",
+  );
+
+  const newOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 200,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "fresh-owner",
+    pidExists: (pid) => pid === process.pid,
+    coordinatorAvailable: () => false,
+  });
+
+  expect(newOwner).toEqual(createLock({ acquiredAt: 200, ownerId: "fresh-owner" }));
+  expect(await readFile(filePath, "utf8")).toBe(
+    JSON.stringify(createLock({ acquiredAt: 200, ownerId: "fresh-owner" })),
+  );
+});
+
+test("a newer valid guard is not removed by a contender", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "locks", "startup.lock");
+  const guardPath = `${filePath}.guard`;
+  const validGuard = createLock({
+    pid: process.pid,
+    acquiredAt: Date.now(),
+    ownerId: "valid-guard",
+  });
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(createLock({ pid: 999_999, ownerId: "stale-lock" })), "utf8");
+  await writeFile(guardPath, JSON.stringify(validGuard), "utf8");
+
+  expect(
+    await acquireStartupLock(filePath, {
+      pid: process.pid,
+      acquiredAt: 200,
+      staleAfterMs: 10_000,
+      startupTimeoutMs: 1_000,
+      ownerId: "contender-owner",
+      pidExists: (pid) => pid === process.pid,
+      coordinatorAvailable: () => false,
+      guardTimeoutMs: 20,
+    }),
+  ).toBeNull();
+
+  expect(await readFile(guardPath, "utf8")).toBe(JSON.stringify(validGuard));
+  expect(await readFile(filePath, "utf8")).toBe(
+    JSON.stringify(createLock({ pid: 999_999, ownerId: "stale-lock" })),
+  );
+});

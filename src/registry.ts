@@ -41,12 +41,26 @@ export type AcquireStartupLockOptions = {
   now?: number;
   pidExists?: (pid: number) => boolean;
   coordinatorAvailable?: () => boolean;
+  guardNow?: () => number;
+  guardPidExists?: (pid: number) => boolean;
+  guardStaleAfterMs?: number;
+  guardTimeoutMs?: number;
 };
 
 type LockFileRecord = {
   raw: string;
   lock: StartupLock | null;
 };
+
+type MutationGuardOptions = {
+  now?: () => number;
+  pidExists?: (pid: number) => boolean;
+  staleAfterMs?: number;
+  timeoutMs?: number;
+};
+
+const defaultGuardStaleAfterMs = 1_000;
+const defaultGuardTimeoutMs = 1_000;
 
 export async function readRegistration(filePath: string): Promise<Registration | null> {
   return readJsonFile<Registration>(filePath);
@@ -135,11 +149,20 @@ export async function acquireStartupLock(
 
     await rm(filePath, { force: true });
     return (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) ? nextLock : null;
+  }, {
+    now: options.guardNow,
+    pidExists: options.guardPidExists,
+    staleAfterMs: options.guardStaleAfterMs,
+    timeoutMs: options.guardTimeoutMs,
   });
 }
 
-export async function releaseStartupLock(filePath: string, owner: StartupLock): Promise<boolean> {
-  return withMutationGuard(filePath, async () => {
+export async function releaseStartupLock(
+  filePath: string,
+  owner: StartupLock,
+  options: MutationGuardOptions = {},
+): Promise<boolean> {
+  const result = await withMutationGuard(filePath, async () => {
     const currentRecord = await readLockFileRecord(filePath);
     if (currentRecord === null || currentRecord.lock === null) {
       return false;
@@ -156,7 +179,8 @@ export async function releaseStartupLock(filePath: string, owner: StartupLock): 
 
     await rm(filePath, { force: true });
     return true;
-  });
+  }, options);
+  return result ?? false;
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -213,22 +237,98 @@ async function tryWriteExclusive(filePath: string, contents: string): Promise<bo
   }
 }
 
-async function withMutationGuard<T>(filePath: string, action: () => Promise<T>): Promise<T> {
+async function withMutationGuard<T>(
+  filePath: string,
+  action: () => Promise<T>,
+  options: MutationGuardOptions,
+): Promise<T | null> {
   const guardPath = `${filePath}.guard`;
-
-  while (!(await tryWriteExclusive(guardPath, String(process.pid)))) {
-    await sleep(5);
+  const guardOwner = await acquireMutationGuard(guardPath, options);
+  if (guardOwner === null) {
+    return null;
   }
 
   try {
     return await action();
   } finally {
-    await rm(guardPath, { force: true });
+    await releaseMutationGuard(guardPath, guardOwner);
   }
+}
+
+async function acquireMutationGuard(
+  guardPath: string,
+  options: MutationGuardOptions,
+): Promise<StartupLock | null> {
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.timeoutMs ?? defaultGuardTimeoutMs);
+  const nextGuard: StartupLock = {
+    pid: process.pid,
+    acquiredAt: now(),
+    ownerId: randomUUID(),
+  };
+
+  while (true) {
+    if (await tryWriteExclusive(guardPath, JSON.stringify(nextGuard))) {
+      return nextGuard;
+    }
+
+    const currentRecord = await readLockFileRecord(guardPath);
+    if (currentRecord !== null && isStaleMutationGuard(currentRecord.lock, {
+      now: now(),
+      pidExists: options.pidExists ?? defaultPidExists,
+      staleAfterMs: options.staleAfterMs ?? defaultGuardStaleAfterMs,
+    })) {
+      const latestRecord = await readLockFileRecord(guardPath);
+      if (latestRecord !== null && latestRecord.raw === currentRecord.raw) {
+        await rm(guardPath, { force: true });
+      }
+      continue;
+    }
+
+    if (now() >= deadline) {
+      return null;
+    }
+
+    await sleep(5);
+  }
+}
+
+async function releaseMutationGuard(guardPath: string, owner: StartupLock): Promise<boolean> {
+  const currentRecord = await readLockFileRecord(guardPath);
+  if (currentRecord === null || currentRecord.lock === null) {
+    return false;
+  }
+
+  if (!isSameLockOwner(currentRecord.lock, owner)) {
+    return false;
+  }
+
+  const latestRecord = await readLockFileRecord(guardPath);
+  if (latestRecord === null || latestRecord.raw !== currentRecord.raw) {
+    return false;
+  }
+
+  await rm(guardPath, { force: true });
+  return true;
 }
 
 function createTempPath(filePath: string): string {
   return join(dirname(filePath), `${filePath.split("/").pop() ?? "file"}.${randomUUID()}.tmp`);
+}
+
+function isStaleMutationGuard(
+  guard: StartupLock | null,
+  options: Required<Pick<MutationGuardOptions, "pidExists" | "staleAfterMs">> & { now: number },
+): boolean {
+  if (guard === null) {
+    return true;
+  }
+
+  if (!options.pidExists(guard.pid)) {
+    return true;
+  }
+
+  return options.now - guard.acquiredAt > options.staleAfterMs;
 }
 
 function isSameLockOwner(left: StartupLock, right: StartupLock): boolean {
