@@ -1,14 +1,15 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
 import { runCli } from '../../src/cli'
+import type { ClientNotice } from '../../src/client'
 import { createClient } from '../../src/client'
+import { loadConfig } from '../../src/config'
 import {
   createCapturedWriter,
   createMessageCollector,
   createTempDir,
   waitForCollectedMessage,
 } from '../support/client-server'
-import { loadConfig } from '../../src/config'
 
 test('config defaults runtime directory and merge modes', () => {
   const config = loadConfig({}, '/workspace')
@@ -82,9 +83,10 @@ test('cli ps prints concise task summaries', async () => {
           message !== null &&
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
-          typeof (message as { event?: { type?: string } }).event ===
+          typeof (message as unknown as { event?: { type?: string } }).event ===
             'object' &&
-          (message as { event: { type?: string } }).event.type === 'started',
+          (message as unknown as { event: { type?: string } }).event.type ===
+            'started',
       )
 
       const stdout = createCapturedWriter()
@@ -111,7 +113,7 @@ test('cli ps prints concise task summaries', async () => {
 
 test('cli cancel requests cancellation for a task', async () => {
   const runtimeDir = await createTempDir()
-  const notices: Array<{ type: string; message: string }> = []
+  const notices: ClientNotice[] = []
   const collector = createMessageCollector()
 
   const client = await createClient({
@@ -140,8 +142,10 @@ test('cli cancel requests cancellation for a task', async () => {
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'started',
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'started',
     )
 
     const stdout = createCapturedWriter()
@@ -167,8 +171,10 @@ test('cli cancel requests cancellation for a task', async () => {
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'cancelled' &&
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'cancelled' &&
         (message as { taskId?: string }).taskId === accepted.taskId,
     )
   } finally {

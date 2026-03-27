@@ -1,18 +1,19 @@
 import { expect, test, vi } from 'bun:test'
 import { join } from 'node:path'
+import type { ClientNotice } from '../../src/client'
 import { createClient } from '../../src/client'
+import { encodeMessage, protocolVersion } from '../../src/protocol'
+import { readRegistration } from '../../src/registry'
+import { startServer } from '../../src/server'
 import {
   connectToServer,
   createMessageCollector,
   createTempDir,
   nextMessageWithin,
-  waitForCondition,
   waitForCollectedMessage,
+  waitForCondition,
   waitForMessage,
 } from '../support/client-server'
-import { encodeMessage, protocolVersion } from '../../src/protocol'
-import { readRegistration } from '../../src/registry'
-import { startServer } from '../../src/server'
 
 test('starts the coordinator server and writes registration', async () => {
   const runtimeDir = await createTempDir()
@@ -249,11 +250,13 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string; data?: string } })
-          .event === 'object' &&
-        (message as { event: { type?: string; data?: string } }).event.type ===
-          'stdout' &&
-        (message as { event: { data?: string } }).event.data === 'first\n',
+        typeof (
+          message as unknown as { event?: { type?: string; data?: string } }
+        ).event === 'object' &&
+        (message as unknown as { event: { type?: string; data?: string } })
+          .event.type === 'stdout' &&
+        (message as unknown as { event: { data?: string } }).event.data ===
+          'first\n',
     )
 
     const sessionB = await connectToServer(server.port)
@@ -303,18 +306,19 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
           typeof (
-            message as {
+            message as unknown as {
               event?: { type?: string; data?: string; replay?: boolean }
             }
           ).event === 'object' &&
           (
-            message as {
+            message as unknown as {
               event: { type?: string; data?: string; replay?: boolean }
             }
           ).event.type === 'stdout' &&
-          (message as { event: { data?: string; replay?: boolean } }).event
-            .data === 'first\n' &&
-          (message as { event: { replay?: boolean } }).event.replay === true,
+          (message as unknown as { event: { data?: string; replay?: boolean } })
+            .event.data === 'first\n' &&
+          (message as unknown as { event: { replay?: boolean } }).event
+            .replay === true,
       ),
     ).toEqual({
       type: 'task-event',
@@ -337,11 +341,13 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
           message !== null &&
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
-          typeof (message as { event?: { type?: string; data?: string } })
-            .event === 'object' &&
-          (message as { event: { type?: string; data?: string } }).event
-            .type === 'stderr' &&
-          (message as { event: { data?: string } }).event.data === 'err\n',
+          typeof (
+            message as unknown as { event?: { type?: string; data?: string } }
+          ).event === 'object' &&
+          (message as unknown as { event: { type?: string; data?: string } })
+            .event.type === 'stderr' &&
+          (message as unknown as { event: { data?: string } }).event.data ===
+            'err\n',
       ),
     ).toEqual({
       type: 'task-event',
@@ -463,8 +469,10 @@ test('ps returns rich task summaries including queue position', async () => {
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'started',
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'started',
     )
 
     session.send({
@@ -483,11 +491,13 @@ test('ps returns rich task summaries including queue position', async () => {
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string; position?: number } })
-          .event === 'object' &&
-        (message as { event: { type?: string; position?: number } }).event
-          .type === 'queued' &&
-        (message as { event: { position?: number } }).event.position === 2,
+        typeof (
+          message as unknown as { event?: { type?: string; position?: number } }
+        ).event === 'object' &&
+        (message as unknown as { event: { type?: string; position?: number } })
+          .event.type === 'queued' &&
+        (message as unknown as { event: { position?: number } }).event
+          .position === 2,
     )
 
     session.send({ type: 'ps', requestId: 'ps-rich' })
@@ -585,8 +595,10 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'started',
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'started',
     )
 
     const sessionB = await connectToServer(server.port)
@@ -668,9 +680,10 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
           message !== null &&
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
-          typeof (message as { event?: { type?: string } }).event ===
+          typeof (message as unknown as { event?: { type?: string } }).event ===
             'object' &&
-          (message as { event: { type?: string } }).event.type === 'cancelled',
+          (message as unknown as { event: { type?: string } }).event.type ===
+            'cancelled',
       ),
     ).toEqual({
       type: 'task-event',
@@ -723,8 +736,10 @@ test('missed heartbeats detach the attached subscriber and auto-cancel the task'
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'started',
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'started',
     )
 
     session.send({ type: 'heartbeat', sentAt: 1 })
@@ -743,9 +758,10 @@ test('missed heartbeats detach the attached subscriber and auto-cancel the task'
           message !== null &&
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
-          typeof (message as { event?: { type?: string } }).event ===
+          typeof (message as unknown as { event?: { type?: string } }).event ===
             'object' &&
-          (message as { event: { type?: string } }).event.type === 'cancelled',
+          (message as unknown as { event: { type?: string } }).event.type ===
+            'cancelled',
         1_000,
       ),
     ).toEqual({
@@ -901,7 +917,8 @@ test('createClient can run commands and detach subscriptions explicitly', async 
           message !== null &&
           'type' in message &&
           (message as { type?: string }).type === 'task-event' &&
-          (message as { event?: { type?: string } }).event?.type === 'stdout',
+          (message as unknown as { event?: { type?: string } }).event?.type ===
+            'stdout',
       ),
     ).toEqual({
       type: 'task-event',
@@ -953,8 +970,10 @@ test('createClient can run commands and detach subscriptions explicitly', async 
         message !== null &&
         'type' in message &&
         (message as { type?: string }).type === 'task-event' &&
-        typeof (message as { event?: { type?: string } }).event === 'object' &&
-        (message as { event: { type?: string } }).event.type === 'cancelled' &&
+        typeof (message as unknown as { event?: { type?: string } }).event ===
+          'object' &&
+        (message as unknown as { event: { type?: string } }).event.type ===
+          'cancelled' &&
         (message as { taskId?: string }).taskId === cancelAccepted.taskId,
     )
 
@@ -980,7 +999,7 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
     heartbeatTimeoutMs: 5_000,
   })
 
-  const notices: Array<{ type: string; message: string }> = []
+  const notices: ClientNotice[] = []
   const client = await createClient({
     runtimeDir,
     heartbeatIntervalMs: 20,
@@ -1034,7 +1053,7 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
     heartbeatTimeoutMs: 5_000,
   })
 
-  const notices: Array<{ type: string; message: string }> = []
+  const notices: ClientNotice[] = []
   const client = await createClient({
     runtimeDir,
     heartbeatIntervalMs: 20,
@@ -1080,7 +1099,7 @@ test('createClient surfaces a notice when a task is queued', async () => {
     heartbeatTimeoutMs: 5_000,
   })
 
-  const notices: Array<{ type: string; message: string }> = []
+  const notices: ClientNotice[] = []
   const client = await createClient({
     runtimeDir,
     heartbeatIntervalMs: 20,
@@ -1147,7 +1166,7 @@ test('createClient cleans up socket and bootstrap server on handshake failure', 
               type: 'hello-ack',
               serverVersion: '0.1.0',
               protocolVersion: protocolVersion + 1,
-            }),
+            } as unknown as Parameters<typeof encodeMessage>[0]),
           )
         })
       }

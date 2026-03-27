@@ -5,6 +5,7 @@ import type {
 } from '../output-buffer'
 import type { PsTask, ServerToClient, TaskEvent } from '../protocol'
 import type { SchedulerTask } from '../scheduler'
+import type { TaskSnapshot } from '../task-manager'
 import { resolveLaneKey } from '../task-routing'
 import type { ServerRuntime, Session, TaskRuntimeState } from './types'
 
@@ -88,14 +89,12 @@ export function finalizeTask(
 
 export function findTaskPsView(
   runtime: ServerRuntime,
-  task: {
-    taskId: string
-    status: 'queued' | 'running'
-    canonicalExecutionCwd: string
-    argv: string[]
-    subscriberCount: number
-  },
+  task: TaskSnapshot,
 ): PsTask {
+  if (task.status !== 'queued' && task.status !== 'running') {
+    throw new Error(`cannot build ps view for inactive task ${task.taskId}`)
+  }
+
   const queuePosition =
     task.status === 'queued'
       ? queuePositionFor(runtime, task.taskId)

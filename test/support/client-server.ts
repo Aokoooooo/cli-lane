@@ -1,4 +1,4 @@
-import { afterEach, vi } from 'bun:test'
+import { afterEach } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'

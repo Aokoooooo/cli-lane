@@ -30,7 +30,7 @@ export type Client = {
   close(): Promise<void>
 }
 
-export type Waiter<T> = {
+export type Waiter<T extends ServerToClient> = {
   predicate: (message: ServerToClient) => message is T
   resolve: (message: T) => void
   reject: (error: Error) => void

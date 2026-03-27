@@ -17,6 +17,16 @@ import {
 } from '../registry'
 import { Scheduler, type SchedulerTask } from '../scheduler'
 import {
+  TaskManager,
+  type TaskMergeMode,
+  type TaskSnapshot,
+} from '../task-manager'
+import {
+  normalizeMergeMode,
+  normalizeSerialMode,
+  resolveSerialKey,
+} from '../task-routing'
+import {
   addTaskSession,
   appendOutput,
   broadcastTaskEvent,
@@ -31,16 +41,6 @@ import {
   sendTaskEvent,
 } from './output'
 import type { ServerRuntime, Session, TaskRuntimeState } from './types'
-import {
-  TaskManager,
-  type TaskMergeMode,
-  type TaskSnapshot,
-} from '../task-manager'
-import {
-  normalizeMergeMode,
-  normalizeSerialMode,
-  resolveSerialKey,
-} from '../task-routing'
 
 export type StartServerOptions = {
   runtimeDir: string
@@ -630,12 +630,12 @@ async function startTask(
 
   const snapshot = findTask(runtime, taskId)
   if (!snapshot) {
-    finalizeTask(runtime, taskId)
+    finalizeTask(runtime, taskId, () => {})
     return
   }
 
   if (!runtime.taskManager.markTaskRunning(taskId)) {
-    finalizeTask(runtime, taskId)
+    finalizeTask(runtime, taskId, () => {})
     return
   }
 

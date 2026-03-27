@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { connectOrBootstrap } from './bootstrap'
 import type {
   AcceptedMessage,
   ClientToServer,
@@ -8,6 +7,7 @@ import type {
   SubscriptionDetachedMessage,
 } from '../protocol'
 import { startServer } from '../server'
+import { connectOrBootstrap } from './bootstrap'
 
 export type { ClientNotice } from './notices'
 
@@ -114,21 +114,21 @@ async function sendRequest<T extends ServerToClient>(
   sendMessage(state, message)
 
   if (message.type === 'run') {
-    return await waitForMessage(
+    return (await waitForMessage(
       state,
-      (candidate): candidate is T =>
+      (candidate): candidate is Extract<T, AcceptedMessage> =>
         candidate.type === 'accepted' &&
         candidate.requestId === message.requestId,
-    )
+    )) as T
   }
 
   if (message.type === 'ps') {
-    return await waitForMessage(
+    return (await waitForMessage(
       state,
-      (candidate): candidate is T =>
+      (candidate): candidate is Extract<T, PsResultMessage> =>
         candidate.type === 'ps-result' &&
         candidate.requestId === message.requestId,
-    )
+    )) as T
   }
 
   throw new Error('unsupported request type')

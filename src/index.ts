@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
-export { runCli } from './cli'
 export type { CliIO } from './cli'
-export { createClient } from './client'
+export { runCli } from './cli'
 export type { Client, ClientOptions } from './client'
-export { startServer } from './server'
+export { createClient } from './client'
 export type { CoordinatorServer, StartServerOptions } from './server'
+export { startServer } from './server'
 
 if (import.meta.main) {
   try {

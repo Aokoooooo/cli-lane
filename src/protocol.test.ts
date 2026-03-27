@@ -31,12 +31,12 @@ test('encodes and decodes task-event messages', () => {
   const raw = encodeMessage({
     type: 'task-event',
     taskId: 'task-1',
-    event: 'started',
+    event: { type: 'started' },
   })
   const messages = decodeMessages(raw)
 
   expect(messages).toEqual([
-    { type: 'task-event', taskId: 'task-1', event: 'started' },
+    { type: 'task-event', taskId: 'task-1', event: { type: 'started' } },
   ])
 })
 
@@ -70,6 +70,8 @@ test('encodes and decodes accepted messages', () => {
     taskId: 'task-1',
     subscriberId: 'sub-1',
     merged: false,
+    executionCwd: '/workspace',
+    requestedCwd: '/workspace',
   })
   const messages = decodeMessages(raw)
 
@@ -80,6 +82,8 @@ test('encodes and decodes accepted messages', () => {
       taskId: 'task-1',
       subscriberId: 'sub-1',
       merged: false,
+      executionCwd: '/workspace',
+      requestedCwd: '/workspace',
     },
   ])
 })
@@ -88,7 +92,16 @@ test('encodes and decodes ps-result messages', () => {
   const raw = encodeMessage({
     type: 'ps-result',
     requestId: 'req-1',
-    tasks: [{ taskId: 'task-1' }],
+    tasks: [
+      {
+        taskId: 'task-1',
+        status: 'running',
+        cwd: '/workspace',
+        argv: ['bun', 'run'],
+        subscriberCount: 1,
+        merged: false,
+      },
+    ],
   })
   const messages = decodeMessages(raw)
 
@@ -96,7 +109,16 @@ test('encodes and decodes ps-result messages', () => {
     {
       type: 'ps-result',
       requestId: 'req-1',
-      tasks: [{ taskId: 'task-1' }],
+      tasks: [
+        {
+          taskId: 'task-1',
+          status: 'running',
+          cwd: '/workspace',
+          argv: ['bun', 'run'],
+          subscriberCount: 1,
+          merged: false,
+        },
+      ],
     },
   ])
 })
@@ -124,13 +146,13 @@ test('decodes multiple ndjson messages in one buffer', () => {
     encodeMessage({
       type: 'task-event',
       taskId: 'task-1',
-      event: 'started',
+      event: { type: 'started' },
     }).trimEnd(),
   ].join('\n')}\n`
 
   expect(decodeMessages(raw)).toEqual([
     { type: 'heartbeat', sentAt: 1 },
-    { type: 'task-event', taskId: 'task-1', event: 'started' },
+    { type: 'task-event', taskId: 'task-1', event: { type: 'started' } },
   ])
 })
 

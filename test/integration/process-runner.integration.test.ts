@@ -181,7 +181,7 @@ test('runProcess rejects promptly when termination fails in-flight', async () =>
     },
   }
 
-  Bun.spawn = (() => fakeProc) as typeof Bun.spawn
+  Bun.spawn = (() => fakeProc) as unknown as typeof Bun.spawn
 
   try {
     const runPromise = runProcess({
