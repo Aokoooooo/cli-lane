@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "bun run src/cli.ts",
-    "test": "bun test --pass-with-no-tests",
+    "test": "bun test",
     "build": "bun build --compile ./src/cli.ts --outfile cli-lane"
   }
 }
