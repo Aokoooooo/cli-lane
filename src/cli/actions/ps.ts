@@ -1,6 +1,6 @@
-import { createClient } from "../../client";
-import type { CliConfig } from "../../config";
-import { formatPsTask, writeLine } from "../format";
+import { createClient } from '../../client'
+import type { CliConfig } from '../../config'
+import { formatPsTask, writeLine } from '../format'
 
 export async function psCommand(
   config: CliConfig,
@@ -11,21 +11,21 @@ export async function psCommand(
     clientVersion: config.clientVersion,
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     bootstrapIfMissing: config.bootstrapIfMissing,
-  });
+  })
 
   try {
-    const result = await client.ps();
+    const result = await client.ps()
     if (result.tasks.length === 0) {
-      writeLine(stdout, "No active tasks.");
-      return 0;
+      writeLine(stdout, 'No active tasks.')
+      return 0
     }
 
     for (const task of result.tasks) {
-      writeLine(stdout, formatPsTask(task));
+      writeLine(stdout, formatPsTask(task))
     }
 
-    return 0;
+    return 0
   } finally {
-    await client.close();
+    await client.close()
   }
 }

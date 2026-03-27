@@ -1,21 +1,38 @@
-import { randomUUID } from "node:crypto";
-import type { AcceptedMessage, ClientToServer, PsResultMessage, ServerToClient, SubscriptionDetachedMessage } from "./protocol";
-import { startServer } from "./server";
-import { connectOrBootstrap } from "./client/bootstrap";
-export type { ClientNotice } from "./client/notices";
-import { clearHeartbeatTimer, closeClient, sendMessage, waitForMessage } from "./client/socket";
-export type { Client, ClientOptions } from "./client/types";
-import type { ConnectionState, Client, ClientOptions } from "./client/types";
+import { randomUUID } from 'node:crypto'
+import { connectOrBootstrap } from './client/bootstrap'
+import type {
+  AcceptedMessage,
+  ClientToServer,
+  PsResultMessage,
+  ServerToClient,
+  SubscriptionDetachedMessage,
+} from './protocol'
+import { startServer } from './server'
 
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
-const DEFAULT_BOOTSTRAP_IF_MISSING = true;
+export type { ClientNotice } from './client/notices'
+
+import {
+  clearHeartbeatTimer,
+  closeClient,
+  sendMessage,
+  waitForMessage,
+} from './client/socket'
+
+export type { Client, ClientOptions } from './client/types'
+
+import type { Client, ClientOptions, ConnectionState } from './client/types'
+
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000
+const DEFAULT_BOOTSTRAP_IF_MISSING = true
 
 export async function createClient(options: ClientOptions): Promise<Client> {
-  const runtimeDir = options.runtimeDir;
-  const clientVersion = options.clientVersion ?? "0.1.0";
-  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-  const bootstrapIfMissing = options.bootstrapIfMissing ?? DEFAULT_BOOTSTRAP_IF_MISSING;
-  const startCoordinator = options.startServer ?? startServer;
+  const runtimeDir = options.runtimeDir
+  const clientVersion = options.clientVersion ?? '0.1.0'
+  const heartbeatIntervalMs =
+    options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS
+  const bootstrapIfMissing =
+    options.bootstrapIfMissing ?? DEFAULT_BOOTSTRAP_IF_MISSING
+  const startCoordinator = options.startServer ?? startServer
 
   const state = await connectOrBootstrap({
     runtimeDir,
@@ -24,92 +41,95 @@ export async function createClient(options: ClientOptions): Promise<Client> {
     clientVersion,
     onMessage: options.onMessage,
     onNotice: options.onNotice,
-  });
+  })
 
-  startHeartbeat(state, heartbeatIntervalMs);
+  startHeartbeat(state, heartbeatIntervalMs)
 
   return {
     run(request) {
       return sendRequest<AcceptedMessage>(state, {
-        type: "run",
+        type: 'run',
         requestId: randomUUID(),
         cwd: request.cwd,
         argv: [...request.argv],
-        serialMode: request.serialMode ?? "global",
-        mergeMode: request.mergeMode ?? "by-cwd",
-      });
+        serialMode: request.serialMode ?? 'global',
+        mergeMode: request.mergeMode ?? 'by-cwd',
+      })
     },
     ps() {
       return sendRequest<PsResultMessage>(state, {
-        type: "ps",
+        type: 'ps',
         requestId: randomUUID(),
-      });
+      })
     },
     async cancelTask(taskId: string) {
       sendMessage(state, {
-        type: "cancel-task",
+        type: 'cancel-task',
         taskId,
-      });
+      })
     },
     cancelSubscription(taskId: string, subscriberId: string) {
       sendMessage(state, {
-        type: "cancel-subscription",
+        type: 'cancel-subscription',
         taskId,
         subscriberId,
-      });
+      })
 
       return waitForMessage<SubscriptionDetachedMessage>(
         state,
         (message): message is SubscriptionDetachedMessage =>
-          message.type === "subscription-detached" &&
+          message.type === 'subscription-detached' &&
           message.taskId === taskId &&
           message.subscriberId === subscriberId,
-      );
+      )
     },
     close() {
-      return closeClient(state);
+      return closeClient(state)
     },
-  };
+  }
 }
 
-function startHeartbeat(state: ConnectionState, heartbeatIntervalMs: number): void {
-  clearHeartbeatTimer(state);
+function startHeartbeat(
+  state: ConnectionState,
+  heartbeatIntervalMs: number,
+): void {
+  clearHeartbeatTimer(state)
   state.heartbeatTimer = setInterval(() => {
     if (state.closed) {
-      clearHeartbeatTimer(state);
-      return;
+      clearHeartbeatTimer(state)
+      return
     }
 
     sendMessage(state, {
-      type: "heartbeat",
+      type: 'heartbeat',
       sentAt: Date.now(),
-    });
-  }, heartbeatIntervalMs);
+    })
+  }, heartbeatIntervalMs)
 }
 
 async function sendRequest<T extends ServerToClient>(
   state: ConnectionState,
   message: ClientToServer,
 ): Promise<T> {
-  sendMessage(state, message);
+  sendMessage(state, message)
 
-  if (message.type === "run") {
+  if (message.type === 'run') {
     return await waitForMessage(
       state,
       (candidate): candidate is T =>
-        candidate.type === "accepted" &&
+        candidate.type === 'accepted' &&
         candidate.requestId === message.requestId,
-    );
+    )
   }
 
-  if (message.type === "ps") {
+  if (message.type === 'ps') {
     return await waitForMessage(
       state,
       (candidate): candidate is T =>
-        candidate.type === "ps-result" &&
+        candidate.type === 'ps-result' &&
         candidate.requestId === message.requestId,
-    );
+    )
   }
 
-  throw new Error("unsupported request type");
+  throw new Error('unsupported request type')
 }

@@ -1,17 +1,21 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { OutputBuffer } from "./output-buffer";
-import { normalizeCwd } from "./path-utils";
+import { randomUUID } from 'node:crypto'
+import { mkdir, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { OutputBuffer } from './output-buffer'
+import { normalizeCwd } from './path-utils'
+import { runProcess } from './process-runner'
 import {
   decodeMessageChunk,
   protocolVersion,
   type RunMessage,
-} from "./protocol";
-import { runProcess } from "./process-runner";
-import { acquireStartupLock, removeRegistration, type Registration, writeRegistration } from "./registry";
-import { Scheduler, type SchedulerTask } from "./scheduler";
-import { TaskManager, type TaskMergeMode, type TaskSnapshot } from "./task-manager";
+} from './protocol'
+import {
+  acquireStartupLock,
+  type Registration,
+  removeRegistration,
+  writeRegistration,
+} from './registry'
+import { Scheduler, type SchedulerTask } from './scheduler'
 import {
   addTaskSession,
   appendOutput,
@@ -25,38 +29,49 @@ import {
   replayBufferedOutput,
   send,
   sendTaskEvent,
-} from "./server/output";
-import type { ServerRuntime, Session, TaskRuntimeState } from "./server/types";
-import { normalizeMergeMode, normalizeSerialMode, resolveSerialKey } from "./task-routing";
+} from './server/output'
+import type { ServerRuntime, Session, TaskRuntimeState } from './server/types'
+import {
+  TaskManager,
+  type TaskMergeMode,
+  type TaskSnapshot,
+} from './task-manager'
+import {
+  normalizeMergeMode,
+  normalizeSerialMode,
+  resolveSerialKey,
+} from './task-routing'
 
 export type StartServerOptions = {
-  runtimeDir: string;
-  serverVersion?: string;
-  terminateGraceMs?: number;
-  idleTimeoutMs?: number;
-  maxBufferedOutputBytes?: number;
-  heartbeatTimeoutMs?: number;
-  listenHost?: string;
-};
+  runtimeDir: string
+  serverVersion?: string
+  terminateGraceMs?: number
+  idleTimeoutMs?: number
+  maxBufferedOutputBytes?: number
+  heartbeatTimeoutMs?: number
+  listenHost?: string
+}
 
 export type CoordinatorServer = {
-  port: number;
-  registrationPath: string;
-  registration: Registration;
-  stop: () => Promise<void>;
-};
+  port: number
+  registrationPath: string
+  registration: Registration
+  stop: () => Promise<void>
+}
 
-const DEFAULT_SERVER_VERSION = "0.1.0";
-const DEFAULT_TERMINATE_GRACE_MS = 3_000;
-const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024;
-const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
-const DEFAULT_HANDSHAKE_TIMEOUT_MS = 1_000;
+const DEFAULT_SERVER_VERSION = '0.1.0'
+const DEFAULT_TERMINATE_GRACE_MS = 3_000
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000
+const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 1_000
 
-export async function startServer(options: StartServerOptions): Promise<CoordinatorServer> {
-  await mkdir(options.runtimeDir, { recursive: true });
+export async function startServer(
+  options: StartServerOptions,
+): Promise<CoordinatorServer> {
+  await mkdir(options.runtimeDir, { recursive: true })
 
-  const registrationPath = join(options.runtimeDir, "registration.json");
+  const registrationPath = join(options.runtimeDir, 'registration.json')
   const runtime: ServerRuntime = {
     taskManager: new TaskManager(),
     scheduler: new Scheduler(),
@@ -66,66 +81,68 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     laneQueues: new Map(),
     sessionBySocket: new WeakMap(),
     stopped: false,
-    registrationToken: "",
+    registrationToken: '',
     terminateGraceMs: options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS,
     idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
-    heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
-    maxBufferedOutputBytes: options.maxBufferedOutputBytes ?? DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
+    heartbeatTimeoutMs:
+      options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    maxBufferedOutputBytes:
+      options.maxBufferedOutputBytes ?? DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
     idleTimer: null,
     stopServer: null,
     handshakeTimeoutMs: DEFAULT_HANDSHAKE_TIMEOUT_MS,
-  };
+  }
 
   const server = Bun.listen({
-    hostname: options.listenHost ?? "127.0.0.1",
+    hostname: options.listenHost ?? '127.0.0.1',
     port: 0,
     socket: {
       open(socket: object) {
         const session: Session = {
           socket,
-          buffer: "",
+          buffer: '',
           authed: false,
           closed: false,
           subscriptions: new Map(),
           replays: new Map(),
           heartbeatTimer: null,
           handshakeTimer: null,
-        };
-
-        runtime.sessions.add(session);
-        runtime.sessionBySocket.set(socket, session);
-        refreshHandshakeTimer(runtime, session);
-        refreshIdleTimer(runtime);
-      },
-      data(socket: object, chunk: string | Uint8Array) {
-        const session = runtime.sessionBySocket.get(socket);
-        if (!session || runtime.stopped) {
-          return;
         }
 
-        session.buffer += toUtf8(chunk);
-        const decoded = decodeMessageChunk(session.buffer);
-        session.buffer = decoded.remainder;
+        runtime.sessions.add(session)
+        runtime.sessionBySocket.set(socket, session)
+        refreshHandshakeTimer(runtime, session)
+        refreshIdleTimer(runtime)
+      },
+      data(socket: object, chunk: string | Uint8Array) {
+        const session = runtime.sessionBySocket.get(socket)
+        if (!session || runtime.stopped) {
+          return
+        }
+
+        session.buffer += toUtf8(chunk)
+        const decoded = decodeMessageChunk(session.buffer)
+        session.buffer = decoded.remainder
 
         for (const message of decoded.messages) {
-          void handleMessage(runtime, session, message);
+          void handleMessage(runtime, session, message)
         }
       },
       close(socket: object) {
-        const session = runtime.sessionBySocket.get(socket);
+        const session = runtime.sessionBySocket.get(socket)
         if (!session) {
-          return;
+          return
         }
 
-        session.closed = true;
-        clearHandshakeTimer(session);
-        runtime.sessions.delete(session);
+        session.closed = true
+        clearHandshakeTimer(session)
+        runtime.sessions.delete(session)
         void detachSession(runtime, session).finally(() => {
-          refreshIdleTimer(runtime);
-        });
+          refreshIdleTimer(runtime)
+        })
       },
     },
-  } as any);
+  } as any)
 
   const registration: Registration = {
     pid: process.pid,
@@ -134,209 +151,263 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     startedAt: Date.now(),
     version: options.serverVersion ?? DEFAULT_SERVER_VERSION,
     protocolVersion,
-  };
-  runtime.registrationToken = registration.token;
+  }
+  runtime.registrationToken = registration.token
 
-  const acquired = await acquireStartupLock(join(options.runtimeDir, "startup.lock"), {
-    pid: process.pid,
-    acquiredAt: registration.startedAt,
-    staleAfterMs: 10_000,
-    startupTimeoutMs: 3_000,
-    coordinatorAvailable: () => true,
-  });
+  const acquired = await acquireStartupLock(
+    join(options.runtimeDir, 'startup.lock'),
+    {
+      pid: process.pid,
+      acquiredAt: registration.startedAt,
+      staleAfterMs: 10_000,
+      startupTimeoutMs: 3_000,
+      coordinatorAvailable: () => true,
+    },
+  )
 
   if (!acquired) {
-    server.stop();
-    throw new Error("failed to acquire startup lock");
+    server.stop()
+    throw new Error('failed to acquire startup lock')
   }
 
   try {
-    await writeRegistration(registrationPath, registration);
+    await writeRegistration(registrationPath, registration)
   } catch (error) {
-    server.stop();
-    throw error;
+    server.stop()
+    throw error
   }
 
   const stop = async () => {
     if (runtime.stopped) {
-      return;
+      return
     }
 
-    runtime.stopped = true;
-    clearIdleTimer(runtime);
+    runtime.stopped = true
+    clearIdleTimer(runtime)
 
     for (const taskState of runtime.taskStates.values()) {
-      taskState.controller.abort();
+      taskState.controller.abort()
     }
 
     for (const session of runtime.sessions) {
-      session.closed = true;
-      clearHandshakeTimer(session);
-      clearHeartbeatTimer(session);
-      session.socket.end?.();
-      session.socket.terminate?.();
-      session.socket.close?.();
+      session.closed = true
+      clearHandshakeTimer(session)
+      clearHeartbeatTimer(session)
+      session.socket.end?.()
+      session.socket.terminate?.()
+      session.socket.close?.()
     }
 
-    await removeRegistration(registrationPath);
-    server.stop();
-    await rm(join(options.runtimeDir, "startup.lock"), { force: true });
-  };
+    await removeRegistration(registrationPath)
+    server.stop()
+    await rm(join(options.runtimeDir, 'startup.lock'), { force: true })
+  }
 
-  runtime.stopServer = stop;
-  refreshIdleTimer(runtime);
+  runtime.stopServer = stop
+  refreshIdleTimer(runtime)
 
   return {
     port: server.port,
     registrationPath,
     registration,
     stop,
-  };
+  }
 }
 
-async function handleMessage(runtime: ServerRuntime, session: Session, message: unknown): Promise<void> {
-  if (!isRecord(message) || typeof message.type !== "string") {
-    send(session, { type: "error", message: "invalid message" });
-    return;
+async function handleMessage(
+  runtime: ServerRuntime,
+  session: Session,
+  message: unknown,
+): Promise<void> {
+  if (!isRecord(message) || typeof message.type !== 'string') {
+    send(session, { type: 'error', message: 'invalid message' })
+    return
   }
 
-  if (message.type === "hello") {
-    await handleHello(runtime, session, message);
-    return;
+  if (message.type === 'hello') {
+    await handleHello(runtime, session, message)
+    return
   }
 
   if (!session.authed) {
-    send(session, { type: "error", message: "hello required before other messages" });
-    return;
+    send(session, {
+      type: 'error',
+      message: 'hello required before other messages',
+    })
+    return
   }
 
-  if (message.type === "heartbeat") {
-    handleHeartbeat(runtime, session, message);
-    return;
+  if (message.type === 'heartbeat') {
+    handleHeartbeat(runtime, session, message)
+    return
   }
 
-  if (message.type === "cancel-subscription") {
-    await handleCancelSubscription(runtime, session, message);
-    return;
+  if (message.type === 'cancel-subscription') {
+    await handleCancelSubscription(runtime, session, message)
+    return
   }
 
-  if (message.type === "run") {
-    await handleRun(runtime, session, message as unknown as RunMessage);
-    return;
+  if (message.type === 'run') {
+    await handleRun(runtime, session, message as unknown as RunMessage)
+    return
   }
 
-  if (message.type === "cancel-task") {
-    handleCancelTask(runtime, message);
-    return;
+  if (message.type === 'cancel-task') {
+    handleCancelTask(runtime, message)
+    return
   }
 
-  if (message.type === "ps") {
-    handlePs(runtime, session, message);
-    return;
+  if (message.type === 'ps') {
+    handlePs(runtime, session, message)
+    return
   }
 
   send(session, {
-    type: "error",
+    type: 'error',
     message: `unsupported message type: ${message.type}`,
-  });
+  })
 }
 
-async function handleHello(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
-  if (typeof message.token !== "string" || typeof message.protocolVersion !== "number") {
-    send(session, { type: "error", message: "invalid hello message" });
-    session.socket.end();
-    return;
+async function handleHello(
+  runtime: ServerRuntime,
+  session: Session,
+  message: Record<string, unknown>,
+): Promise<void> {
+  if (
+    typeof message.token !== 'string' ||
+    typeof message.protocolVersion !== 'number'
+  ) {
+    send(session, { type: 'error', message: 'invalid hello message' })
+    session.socket.end()
+    return
   }
 
   if (message.token !== runtime.registrationToken) {
-    send(session, { type: "error", message: "token mismatch" });
-    session.socket.end();
-    return;
+    send(session, { type: 'error', message: 'token mismatch' })
+    session.socket.end()
+    return
   }
 
   if (message.protocolVersion !== protocolVersion) {
-    send(session, { type: "error", message: "protocol mismatch" });
-    session.socket.end();
-    return;
+    send(session, { type: 'error', message: 'protocol mismatch' })
+    session.socket.end()
+    return
   }
 
-  session.authed = true;
-  clearHandshakeTimer(session);
-  refreshHeartbeatTimer(runtime, session);
+  session.authed = true
+  clearHandshakeTimer(session)
+  refreshHeartbeatTimer(runtime, session)
   send(session, {
-    type: "hello-ack",
+    type: 'hello-ack',
     serverVersion: DEFAULT_SERVER_VERSION,
     protocolVersion,
-  });
+  })
 }
 
-function handleHeartbeat(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
-  if (typeof message.sentAt !== "number") {
-    send(session, { type: "error", message: "invalid heartbeat message" });
-    return;
+function handleHeartbeat(
+  runtime: ServerRuntime,
+  session: Session,
+  message: Record<string, unknown>,
+): void {
+  if (typeof message.sentAt !== 'number') {
+    send(session, { type: 'error', message: 'invalid heartbeat message' })
+    return
   }
 
-  refreshHeartbeatTimer(runtime, session);
+  refreshHeartbeatTimer(runtime, session)
   send(session, {
-    type: "heartbeat-ack",
+    type: 'heartbeat-ack',
     sentAt: message.sentAt,
     serverTime: Date.now(),
-  });
+  })
 }
 
-async function handleCancelSubscription(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
-  if (typeof message.taskId !== "string" || typeof message.subscriberId !== "string") {
-    send(session, { type: "error", message: "invalid cancel-subscription message" });
-    return;
+async function handleCancelSubscription(
+  runtime: ServerRuntime,
+  session: Session,
+  message: Record<string, unknown>,
+): Promise<void> {
+  if (
+    typeof message.taskId !== 'string' ||
+    typeof message.subscriberId !== 'string'
+  ) {
+    send(session, {
+      type: 'error',
+      message: 'invalid cancel-subscription message',
+    })
+    return
   }
 
-  const result = await detachSubscriber(runtime, session, message.taskId, message.subscriberId, true);
+  const result = await detachSubscriber(
+    runtime,
+    session,
+    message.taskId,
+    message.subscriberId,
+    true,
+  )
   if (result.detached) {
     send(session, {
-      type: "subscription-detached",
+      type: 'subscription-detached',
       taskId: message.taskId,
       subscriberId: message.subscriberId,
       remainingSubscribers: result.remainingSubscribers,
       taskStillRunning: result.taskStillRunning,
-    });
+    })
   }
 
-  refreshIdleTimer(runtime);
+  refreshIdleTimer(runtime)
 }
 
-async function handleRun(runtime: ServerRuntime, session: Session, message: RunMessage): Promise<void> {
+async function handleRun(
+  runtime: ServerRuntime,
+  session: Session,
+  message: RunMessage,
+): Promise<void> {
   if (
-    typeof message.requestId !== "string" ||
-    typeof message.cwd !== "string" ||
+    typeof message.requestId !== 'string' ||
+    typeof message.cwd !== 'string' ||
     !Array.isArray(message.argv) ||
     message.argv.length === 0 ||
-    message.argv.some((entry) => typeof entry !== "string")
+    message.argv.some((entry) => typeof entry !== 'string')
   ) {
-    send(session, { type: "error", requestId: asRequestId(message.requestId), message: "invalid run message" });
-    return;
+    send(session, {
+      type: 'error',
+      requestId: asRequestId(message.requestId),
+      message: 'invalid run message',
+    })
+    return
   }
 
-  const requestedCwd = message.cwd;
-  const cwd = await normalizeCwd(requestedCwd);
-  if (runtime.stopped || session.closed || !runtime.sessions.has(session) || !session.authed) {
-    return;
+  const requestedCwd = message.cwd
+  const cwd = await normalizeCwd(requestedCwd)
+  if (
+    runtime.stopped ||
+    session.closed ||
+    !runtime.sessions.has(session) ||
+    !session.authed
+  ) {
+    return
   }
 
-  const mergeMode: TaskMergeMode = normalizeMergeMode(message.mergeMode);
-  const serialMode = normalizeSerialMode(message.serialMode);
+  const mergeMode: TaskMergeMode = normalizeMergeMode(message.mergeMode)
+  const serialMode = normalizeSerialMode(message.serialMode)
   const result = runtime.taskManager.createOrAttach({
     cwd,
     argv: message.argv,
     mergeMode,
-  });
+  })
 
-  const snapshot = findTask(runtime, result.taskId);
+  const snapshot = findTask(runtime, result.taskId)
   if (!snapshot) {
-    send(session, { type: "error", requestId: message.requestId, message: "task unavailable" });
-    return;
+    send(session, {
+      type: 'error',
+      requestId: message.requestId,
+      message: 'task unavailable',
+    })
+    return
   }
 
-  let taskState = runtime.taskStates.get(result.taskId);
+  let taskState = runtime.taskStates.get(result.taskId)
   if (!taskState) {
     taskState = {
       taskId: result.taskId,
@@ -346,81 +417,96 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
       controller: new AbortController(),
       buffer: new OutputBuffer(runtime.maxBufferedOutputBytes),
       terminalEventSent: false,
-    };
-    runtime.taskStates.set(result.taskId, taskState);
+    }
+    runtime.taskStates.set(result.taskId, taskState)
 
-    const schedulerTask = toSchedulerTask(taskState);
-    runtime.scheduler.enqueue(schedulerTask);
-    enqueueLaneTask(runtime, taskState);
+    const schedulerTask = toSchedulerTask(taskState)
+    runtime.scheduler.enqueue(schedulerTask)
+    enqueueLaneTask(runtime, taskState)
   }
 
-  session.subscriptions.set(result.taskId, result.subscriberId);
-  addTaskSession(runtime, result.taskId, session);
+  session.subscriptions.set(result.taskId, result.subscriberId)
+  addTaskSession(runtime, result.taskId, session)
 
   send(session, {
-    type: "accepted",
+    type: 'accepted',
     requestId: message.requestId,
     taskId: result.taskId,
     subscriberId: result.subscriberId,
     merged: result.merged,
     executionCwd: snapshot.canonicalExecutionCwd,
     requestedCwd,
-  });
+  })
 
   if (result.merged) {
-    replayBufferedOutput(session, result.taskId, taskState.buffer);
+    replayBufferedOutput(session, result.taskId, taskState.buffer)
   }
 
-  if (snapshot.status === "queued") {
-    const queuePosition = queuePositionFor(runtime, result.taskId);
+  if (snapshot.status === 'queued') {
+    const queuePosition = queuePositionFor(runtime, result.taskId)
     if (queuePosition !== undefined && queuePosition > 1) {
-      sendTaskEvent(session, result.taskId, { type: "queued", position: queuePosition });
+      sendTaskEvent(session, result.taskId, {
+        type: 'queued',
+        position: queuePosition,
+      })
     }
   }
 
-  drainScheduler(runtime, toSchedulerTask(taskState));
-  refreshIdleTimer(runtime);
+  drainScheduler(runtime, toSchedulerTask(taskState))
+  refreshIdleTimer(runtime)
 }
 
-function handleCancelTask(runtime: ServerRuntime, message: Record<string, unknown>): void {
-  if (typeof message.taskId !== "string") {
-    return;
+function handleCancelTask(
+  runtime: ServerRuntime,
+  message: Record<string, unknown>,
+): void {
+  if (typeof message.taskId !== 'string') {
+    return
   }
 
-  const taskId = message.taskId;
-  const taskState = runtime.taskStates.get(taskId);
-  const canceled = runtime.taskManager.cancelTask(taskId);
+  const taskId = message.taskId
+  const taskState = runtime.taskStates.get(taskId)
+  const canceled = runtime.taskManager.cancelTask(taskId)
   if (!canceled) {
-    return;
+    return
   }
 
   if (taskState) {
-    taskState.controller.abort();
-    emitCancelled(runtime, taskState);
-    drainScheduler(runtime, toSchedulerTask(taskState));
+    taskState.controller.abort()
+    emitCancelled(runtime, taskState)
+    drainScheduler(runtime, toSchedulerTask(taskState))
   } else {
-    broadcastTaskEvent(runtime, taskId, { type: "cancelled" });
+    broadcastTaskEvent(runtime, taskId, { type: 'cancelled' })
   }
 
-  refreshIdleTimer(runtime);
+  refreshIdleTimer(runtime)
 }
 
-function handlePs(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
-  if (typeof message.requestId !== "string") {
-    send(session, { type: "error", message: "invalid ps message" });
-    return;
+function handlePs(
+  runtime: ServerRuntime,
+  session: Session,
+  message: Record<string, unknown>,
+): void {
+  if (typeof message.requestId !== 'string') {
+    send(session, { type: 'error', message: 'invalid ps message' })
+    return
   }
 
-  const tasks = runtime.taskManager.listActiveTasks().map((task) => findTaskPsView(runtime, task));
+  const tasks = runtime.taskManager
+    .listActiveTasks()
+    .map((task) => findTaskPsView(runtime, task))
   send(session, {
-    type: "ps-result",
+    type: 'ps-result',
     requestId: message.requestId,
     tasks,
-  });
+  })
 }
 
-async function detachSession(runtime: ServerRuntime, session: Session): Promise<void> {
-  await detachSessionWithMode(runtime, session, false);
+async function detachSession(
+  runtime: ServerRuntime,
+  session: Session,
+): Promise<void> {
+  await detachSessionWithMode(runtime, session, false)
 }
 
 async function detachSessionWithMode(
@@ -428,10 +514,16 @@ async function detachSessionWithMode(
   session: Session,
   notifyDetachingSession: boolean,
 ): Promise<void> {
-  clearHeartbeatTimer(session);
+  clearHeartbeatTimer(session)
 
   for (const [taskId, subscriberId] of session.subscriptions) {
-    await detachSubscriber(runtime, session, taskId, subscriberId, notifyDetachingSession);
+    await detachSubscriber(
+      runtime,
+      session,
+      taskId,
+      subscriberId,
+      notifyDetachingSession,
+    )
   }
 }
 
@@ -441,102 +533,113 @@ async function detachSubscriber(
   taskId: string,
   subscriberId: string,
   notifyDetachingSession: boolean,
-): Promise<{ detached: boolean; remainingSubscribers: number; taskStillRunning: boolean }> {
-  const expectedSubscriberId = session.subscriptions.get(taskId);
+): Promise<{
+  detached: boolean
+  remainingSubscribers: number
+  taskStillRunning: boolean
+}> {
+  const expectedSubscriberId = session.subscriptions.get(taskId)
   if (expectedSubscriberId !== subscriberId) {
     return {
       detached: false,
       remainingSubscribers: 0,
       taskStillRunning: false,
-    };
+    }
   }
 
-  const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId);
-  session.subscriptions.delete(taskId);
-  session.replays.delete(taskId);
+  const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId)
+  session.subscriptions.delete(taskId)
+  session.replays.delete(taskId)
 
   if (!detached) {
-    removeTaskSession(runtime, taskId, session);
+    removeTaskSession(runtime, taskId, session)
     return {
       detached: false,
       remainingSubscribers: 0,
       taskStillRunning: false,
-    };
+    }
   }
 
-  const taskState = runtime.taskStates.get(taskId);
-  const snapshot = findTask(runtime, taskId);
-  const remainingSubscribers = snapshot?.subscriberCount ?? 0;
-  const taskStillRunning = snapshot?.status === "queued" || snapshot?.status === "running";
+  const taskState = runtime.taskStates.get(taskId)
+  const snapshot = findTask(runtime, taskId)
+  const remainingSubscribers = snapshot?.subscriberCount ?? 0
+  const taskStillRunning =
+    snapshot?.status === 'queued' || snapshot?.status === 'running'
 
-  if (snapshot?.status === "canceled") {
+  if (snapshot?.status === 'canceled') {
     if (taskState) {
-      taskState.controller.abort();
+      taskState.controller.abort()
 
       if (notifyDetachingSession && !taskState.terminalEventSent) {
-        sendTaskEvent(session, taskId, { type: "cancelled" });
+        sendTaskEvent(session, taskId, { type: 'cancelled' })
       }
 
-      removeTaskSession(runtime, taskId, session);
-      emitCancelled(runtime, taskState);
-      drainScheduler(runtime, toSchedulerTask(taskState));
+      removeTaskSession(runtime, taskId, session)
+      emitCancelled(runtime, taskState)
+      drainScheduler(runtime, toSchedulerTask(taskState))
       return {
         detached: true,
         remainingSubscribers,
         taskStillRunning,
-      };
+      }
     }
 
     if (notifyDetachingSession) {
-      sendTaskEvent(session, taskId, { type: "cancelled" });
+      sendTaskEvent(session, taskId, { type: 'cancelled' })
     }
   }
 
-  removeTaskSession(runtime, taskId, session);
+  removeTaskSession(runtime, taskId, session)
   return {
     detached: true,
     remainingSubscribers,
     taskStillRunning,
-  };
+  }
 }
 
-async function evictSessionForHeartbeat(runtime: ServerRuntime, session: Session): Promise<void> {
+async function evictSessionForHeartbeat(
+  runtime: ServerRuntime,
+  session: Session,
+): Promise<void> {
   if (runtime.stopped || !runtime.sessions.has(session)) {
-    return;
+    return
   }
 
-  await detachSessionWithMode(runtime, session, true);
-  runtime.sessions.delete(session);
-  session.closed = true;
-  session.socket.end?.();
+  await detachSessionWithMode(runtime, session, true)
+  runtime.sessions.delete(session)
+  session.closed = true
+  session.socket.end?.()
   setTimeout(() => {
-    session.socket.destroy?.();
-  }, 25);
-  refreshIdleTimer(runtime);
+    session.socket.destroy?.()
+  }, 25)
+  refreshIdleTimer(runtime)
 }
 
-async function startTask(runtime: ServerRuntime, taskId: string): Promise<void> {
+async function startTask(
+  runtime: ServerRuntime,
+  taskId: string,
+): Promise<void> {
   if (runtime.stopped) {
-    return;
+    return
   }
 
-  const taskState = runtime.taskStates.get(taskId);
+  const taskState = runtime.taskStates.get(taskId)
   if (!taskState) {
-    return;
+    return
   }
 
-  const snapshot = findTask(runtime, taskId);
+  const snapshot = findTask(runtime, taskId)
   if (!snapshot) {
-    finalizeTask(runtime, taskId);
-    return;
+    finalizeTask(runtime, taskId)
+    return
   }
 
   if (!runtime.taskManager.markTaskRunning(taskId)) {
-    finalizeTask(runtime, taskId);
-    return;
+    finalizeTask(runtime, taskId)
+    return
   }
 
-  broadcastTaskEvent(runtime, taskId, { type: "started" });
+  broadcastTaskEvent(runtime, taskId, { type: 'started' })
 
   try {
     const result = await runProcess({
@@ -545,134 +648,149 @@ async function startTask(runtime: ServerRuntime, taskId: string): Promise<void> 
       signal: taskState.controller.signal,
       graceMs: runtime.terminateGraceMs,
       onStdout(chunk) {
-        appendOutput(runtime, taskId, "stdout", chunk);
+        appendOutput(runtime, taskId, 'stdout', chunk)
       },
       onStderr(chunk) {
-        appendOutput(runtime, taskId, "stderr", chunk);
+        appendOutput(runtime, taskId, 'stderr', chunk)
       },
-    });
+    })
 
-    const latest = findTask(runtime, taskId);
-    if (latest?.status === "canceled") {
-      emitCancelled(runtime, taskState);
+    const latest = findTask(runtime, taskId)
+    if (latest?.status === 'canceled') {
+      emitCancelled(runtime, taskState)
     } else {
-      runtime.taskManager.markTaskFinished(taskId);
+      runtime.taskManager.markTaskFinished(taskId)
       broadcastTaskEvent(runtime, taskId, {
-        type: "exited",
+        type: 'exited',
         code: result.code,
         signal: result.signal,
-      });
+      })
     }
   } finally {
     finalizeTask(runtime, taskId, (taskLike) => {
-      drainScheduler(runtime, taskLike);
-    });
-    refreshIdleTimer(runtime);
+      drainScheduler(runtime, taskLike)
+    })
+    refreshIdleTimer(runtime)
   }
 }
 
-function drainScheduler(runtime: ServerRuntime, taskLike: Pick<SchedulerTask, "serialMode" | "mergeMode" | "serialKey">): void {
+function drainScheduler(
+  runtime: ServerRuntime,
+  taskLike: Pick<SchedulerTask, 'serialMode' | 'mergeMode' | 'serialKey'>,
+): void {
   if (runtime.stopped) {
-    return;
+    return
   }
 
   while (true) {
-    const next = runtime.scheduler.nextRunnableFor(taskLike);
+    const next = runtime.scheduler.nextRunnableFor(taskLike)
     if (!next) {
-      return;
+      return
     }
 
-    const snapshot = findTask(runtime, next.taskId);
-    if (snapshot?.status === "canceled") {
+    const snapshot = findTask(runtime, next.taskId)
+    if (snapshot?.status === 'canceled') {
       finalizeTask(runtime, next.taskId, (rerunTaskLike) => {
-        drainScheduler(runtime, rerunTaskLike);
-      });
-      continue;
+        drainScheduler(runtime, rerunTaskLike)
+      })
+      continue
     }
 
     if (!runtime.scheduler.markRunning(next.taskId)) {
-      return;
+      return
     }
 
-    void startTask(runtime, next.taskId);
-    return;
+    void startTask(runtime, next.taskId)
+    return
   }
 }
 
 function refreshIdleTimer(runtime: ServerRuntime): void {
   if (runtime.idleTimeoutMs === null) {
-    return;
+    return
   }
 
-  const authedSessionCount = Array.from(runtime.sessions).filter((session) => session.authed).length;
-  const idle = authedSessionCount === 0 && runtime.taskManager.listActiveTasks().length === 0;
+  const authedSessionCount = Array.from(runtime.sessions).filter(
+    (session) => session.authed,
+  ).length
+  const idle =
+    authedSessionCount === 0 &&
+    runtime.taskManager.listActiveTasks().length === 0
   if (!idle) {
-    clearIdleTimer(runtime);
-    return;
+    clearIdleTimer(runtime)
+    return
   }
 
   if (runtime.idleTimer !== null) {
-    return;
+    return
   }
 
   runtime.idleTimer = setTimeout(() => {
-    runtime.idleTimer = null;
-    void runtime.stopServer?.();
-  }, runtime.idleTimeoutMs);
+    runtime.idleTimer = null
+    void runtime.stopServer?.()
+  }, runtime.idleTimeoutMs)
 }
 
 function refreshHeartbeatTimer(runtime: ServerRuntime, session: Session): void {
-  clearHeartbeatTimer(session);
+  clearHeartbeatTimer(session)
   session.heartbeatTimer = setTimeout(() => {
-    void evictSessionForHeartbeat(runtime, session);
-  }, runtime.heartbeatTimeoutMs);
+    void evictSessionForHeartbeat(runtime, session)
+  }, runtime.heartbeatTimeoutMs)
 }
 
 function refreshHandshakeTimer(runtime: ServerRuntime, session: Session): void {
-  clearHandshakeTimer(session);
+  clearHandshakeTimer(session)
   session.handshakeTimer = setTimeout(() => {
-    if (session.authed || session.closed || runtime.stopped || !runtime.sessions.has(session)) {
-      return;
+    if (
+      session.authed ||
+      session.closed ||
+      runtime.stopped ||
+      !runtime.sessions.has(session)
+    ) {
+      return
     }
 
-    runtime.sessions.delete(session);
-    session.closed = true;
-    session.socket.end?.();
-    session.socket.terminate?.();
-    session.socket.close?.();
-    refreshIdleTimer(runtime);
-  }, runtime.handshakeTimeoutMs);
+    runtime.sessions.delete(session)
+    session.closed = true
+    session.socket.end?.()
+    session.socket.terminate?.()
+    session.socket.close?.()
+    refreshIdleTimer(runtime)
+  }, runtime.handshakeTimeoutMs)
 }
 
 function clearHeartbeatTimer(session: Session): void {
   if (session.heartbeatTimer === null) {
-    return;
+    return
   }
 
-  clearTimeout(session.heartbeatTimer);
-  session.heartbeatTimer = null;
+  clearTimeout(session.heartbeatTimer)
+  session.heartbeatTimer = null
 }
 
 function clearHandshakeTimer(session: Session): void {
   if (session.handshakeTimer === null) {
-    return;
+    return
   }
 
-  clearTimeout(session.handshakeTimer);
-  session.handshakeTimer = null;
+  clearTimeout(session.handshakeTimer)
+  session.handshakeTimer = null
 }
 
 function clearIdleTimer(runtime: ServerRuntime): void {
   if (runtime.idleTimer === null) {
-    return;
+    return
   }
 
-  clearTimeout(runtime.idleTimer);
-  runtime.idleTimer = null;
+  clearTimeout(runtime.idleTimer)
+  runtime.idleTimer = null
 }
 
-function findTask(runtime: ServerRuntime, taskId: string): TaskSnapshot | undefined {
-  return runtime.taskManager.listTasks().find((task) => task.taskId === taskId);
+function findTask(
+  runtime: ServerRuntime,
+  taskId: string,
+): TaskSnapshot | undefined {
+  return runtime.taskManager.listTasks().find((task) => task.taskId === taskId)
 }
 
 function toSchedulerTask(taskState: TaskRuntimeState): SchedulerTask {
@@ -681,21 +799,21 @@ function toSchedulerTask(taskState: TaskRuntimeState): SchedulerTask {
     serialMode: taskState.serialMode,
     mergeMode: taskState.mergeMode,
     serialKey: taskState.serialKey,
-  };
+  }
 }
 
 function toUtf8(chunk: string | Uint8Array): string {
-  if (typeof chunk === "string") {
-    return chunk;
+  if (typeof chunk === 'string') {
+    return chunk
   }
 
-  return new TextDecoder().decode(chunk);
+  return new TextDecoder().decode(chunk)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === 'object' && value !== null
 }
 
 function asRequestId(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+  return typeof value === 'string' ? value : undefined
 }

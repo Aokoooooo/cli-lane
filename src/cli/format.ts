@@ -1,16 +1,18 @@
-import type { PsTask, TaskEvent } from "../protocol";
+import type { PsTask, TaskEvent } from '../protocol'
 
-export function exitCodeFromTaskEvent(event: Extract<TaskEvent, { type: "exited" }>): number {
+export function exitCodeFromTaskEvent(
+  event: Extract<TaskEvent, { type: 'exited' }>,
+): number {
   if (event.signal) {
-    return signalExitCode(event.signal);
+    return signalExitCode(event.signal)
   }
 
-  return event.code ?? 1;
+  return event.code ?? 1
 }
 
 export function signalExitCode(signal: string): number {
-  const signalNumber = SIGNAL_NUMBERS[signal];
-  return signalNumber === undefined ? 128 : 128 + signalNumber;
+  const signalNumber = SIGNAL_NUMBERS[signal]
+  return signalNumber === undefined ? 128 : 128 + signalNumber
 }
 
 export function formatPsTask(task: PsTask): string {
@@ -20,18 +22,21 @@ export function formatPsTask(task: PsTask): string {
     `cwd=${task.cwd}`,
     `argv=${formatArgv(task.argv)}`,
     `subscribers=${task.subscriberCount}`,
-    `merged=${task.merged ? "yes" : "no"}`,
-  ];
+    `merged=${task.merged ? 'yes' : 'no'}`,
+  ]
 
   if (task.queuePosition !== undefined) {
-    parts.push(`position=${task.queuePosition}`);
+    parts.push(`position=${task.queuePosition}`)
   }
 
-  return parts.join(" ");
+  return parts.join(' ')
 }
 
-export function writeLine(writer: { write(chunk: string): unknown }, line: string): void {
-  writer.write(`${line}\n`);
+export function writeLine(
+  writer: { write(chunk: string): unknown },
+  line: string,
+): void {
+  writer.write(`${line}\n`)
 }
 
 const SIGNAL_NUMBERS: Record<string, number> = {
@@ -50,8 +55,10 @@ const SIGNAL_NUMBERS: Record<string, number> = {
   SIGPIPE: 13,
   SIGALRM: 14,
   SIGTERM: 15,
-};
+}
 
 function formatArgv(argv: string[]): string {
-  return argv.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(" ");
+  return argv
+    .map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))
+    .join(' ')
 }

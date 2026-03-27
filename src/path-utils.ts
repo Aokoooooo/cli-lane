@@ -1,41 +1,41 @@
-import path from "node:path";
-import { realpath } from "node:fs/promises";
+import { realpath } from 'node:fs/promises'
+import path from 'node:path'
 
 function normalizeSeparators(input: string): string {
-  if (process.platform !== "win32") {
-    return input;
+  if (process.platform !== 'win32') {
+    return input
   }
 
-  return input.replace(/\/+/gu, "\\");
+  return input.replace(/\/+/gu, '\\')
 }
 
 function stripTrailingSeparators(input: string): string {
-  const root = path.parse(input).root;
+  const root = path.parse(input).root
 
   if (input === root) {
-    return input;
+    return input
   }
 
-  return input.replace(/[\\/]+$/u, "");
+  return input.replace(/[\\/]+$/u, '')
 }
 
 export async function normalizeCwd(input: string): Promise<string> {
-  const absolute = path.resolve(input);
+  const absolute = path.resolve(input)
 
-  let normalized = absolute;
+  let normalized = absolute
 
   try {
-    normalized = await realpath(absolute);
+    normalized = await realpath(absolute)
   } catch {
-    normalized = absolute;
+    normalized = absolute
   }
 
-  normalized = normalizeSeparators(normalized);
-  normalized = stripTrailingSeparators(normalized);
+  normalized = normalizeSeparators(normalized)
+  normalized = stripTrailingSeparators(normalized)
 
-  if (process.platform === "win32") {
-    normalized = normalized.toLowerCase();
+  if (process.platform === 'win32') {
+    normalized = normalized.toLowerCase()
   }
 
-  return normalized;
+  return normalized
 }
