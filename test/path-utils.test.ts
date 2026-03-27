@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
-import { normalizeCwd } from "../src/path-utils";
+import { normalizeCwd, normalizeSeparators } from "../src/path-utils";
 
 test("normalizes cwd consistently", async () => {
   const cwd = await normalizeCwd("./");
@@ -15,6 +15,11 @@ test("resolves relative paths to absolute paths", async () => {
 test("strips trailing separators", async () => {
   const cwd = await normalizeCwd("./");
   expect(cwd.endsWith(path.sep)).toBe(false);
+});
+
+test("normalizes separators to the platform canonical separator", () => {
+  const cwd = normalizeSeparators(`foo\\bar/baz`);
+  expect(cwd).toBe(`foo${path.sep}bar${path.sep}baz`);
 });
 
 test("falls back when realpath fails", async () => {
