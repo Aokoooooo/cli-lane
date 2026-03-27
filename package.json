@@ -1,0 +1,11 @@
+{
+  "name": "cli-lane",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "test": "bun test --pass-with-no-tests",
+    "build": "bun build --compile ./src/cli.ts --outfile cli-lane"
+  }
+}
