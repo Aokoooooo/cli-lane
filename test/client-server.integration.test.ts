@@ -1763,3 +1763,51 @@ test("cli run surfaces a cwd mismatch notice for global merges", async () => {
     await client.close();
   }
 });
+
+test("cli run forwards child --help instead of printing cli help", async () => {
+  const runtimeDir = await createTempDir();
+  const stdout = createCapturedWriter();
+  const stderr = createCapturedWriter();
+
+  const exitCode = await runCli(
+    ["run", "--", "bun", "--help"],
+    {
+      env: {
+        CLI_LANE_RUNTIME_DIR: runtimeDir,
+      },
+      stdout,
+      stderr,
+    },
+  );
+
+  expect(exitCode).toBe(0);
+  expect(stdout.toString()).toContain("Bun is a fast JavaScript runtime");
+  expect(stderr.toString()).toBe("");
+});
+
+test("cli run returns shell-style signal exit codes", async () => {
+  const runtimeDir = await createTempDir();
+  const stdout = createCapturedWriter();
+  const stderr = createCapturedWriter();
+
+  const exitCode = await runCli(
+    [
+      "run",
+      "--",
+      "bun",
+      "-e",
+      "process.kill(process.pid, 'SIGTERM')",
+    ],
+    {
+      env: {
+        CLI_LANE_RUNTIME_DIR: runtimeDir,
+      },
+      stdout,
+      stderr,
+    },
+  );
+
+  expect(exitCode).toBe(143);
+  expect(stdout.toString()).toBe("");
+  expect(stderr.toString()).toBe("");
+});

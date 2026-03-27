@@ -15,7 +15,7 @@ export async function runCli(args: string[], io: CliIO = {}): Promise<number> {
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
 
-  if (args.includes("--help") || args.length === 0) {
+  if (args.length === 0 || (args.length === 1 && args[0] === "--help")) {
     stdout.write("cli-lane\n");
     return 0;
   }
@@ -261,11 +261,34 @@ function routeRunMessage(
 
 function exitCodeFromTaskEvent(event: Extract<TaskEvent, { type: "exited" }>): number {
   if (event.signal) {
-    return 128;
+    return signalExitCode(event.signal);
   }
 
   return event.code ?? 1;
 }
+
+function signalExitCode(signal: string): number {
+  const signalNumber = SIGNAL_NUMBERS[signal];
+  return signalNumber === undefined ? 128 : 128 + signalNumber;
+}
+
+const SIGNAL_NUMBERS: Record<string, number> = {
+  SIGHUP: 1,
+  SIGINT: 2,
+  SIGQUIT: 3,
+  SIGILL: 4,
+  SIGTRAP: 5,
+  SIGABRT: 6,
+  SIGBUS: 7,
+  SIGFPE: 8,
+  SIGKILL: 9,
+  SIGUSR1: 10,
+  SIGSEGV: 11,
+  SIGUSR2: 12,
+  SIGPIPE: 13,
+  SIGALRM: 14,
+  SIGTERM: 15,
+};
 
 function formatPsTask(task: PsTask): string {
   const parts = [
