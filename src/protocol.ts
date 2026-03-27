@@ -89,6 +89,14 @@ export type TaskEventMessage = {
   event: TaskEvent;
 };
 
+export type SubscriptionDetachedMessage = {
+  type: "subscription-detached";
+  taskId: string;
+  subscriberId: string;
+  remainingSubscribers: number;
+  taskStillRunning: boolean;
+};
+
 export type PsResultMessage = {
   type: "ps-result";
   requestId: string;
@@ -126,6 +134,7 @@ export type ServerToClient =
   | HeartbeatAckMessage
   | AcceptedMessage
   | TaskEventMessage
+  | SubscriptionDetachedMessage
   | PsResultMessage
   | ErrorMessage;
 

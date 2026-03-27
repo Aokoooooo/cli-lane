@@ -672,7 +672,7 @@ test("accepted message exposes execution cwd and requested cwd for global merges
       requestedCwd: process.cwd(),
     });
 
-    const otherCwd = join(process.cwd(), "test");
+    const otherCwd = `${process.cwd()}/./test/..`;
     const sessionB = await connectToServer(server.port);
     sessionB.send({
       type: "hello",
@@ -894,6 +894,14 @@ test("cancel-subscription detaches only the targeted subscriber", async () => {
       type: "cancel-subscription",
       taskId: acceptedB.taskId,
       subscriberId: acceptedB.subscriberId,
+    });
+
+    expect(await nextMessageWithin(sessionB)).toEqual({
+      type: "subscription-detached",
+      taskId: acceptedB.taskId,
+      subscriberId: acceptedB.subscriberId,
+      remainingSubscribers: 1,
+      taskStillRunning: true,
     });
 
     sessionA.send({ type: "ps", requestId: "ps-still-running" });

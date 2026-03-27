@@ -248,7 +248,7 @@ async function handleMessage(runtime: ServerRuntime, session: Session, message: 
   }
 
   if (message.type === "cancel-subscription") {
-    handleCancelSubscription(runtime, session, message);
+    await handleCancelSubscription(runtime, session, message);
     return;
   }
 
@@ -316,13 +316,23 @@ function handleHeartbeat(runtime: ServerRuntime, session: Session, message: Reco
   });
 }
 
-function handleCancelSubscription(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): void {
+async function handleCancelSubscription(runtime: ServerRuntime, session: Session, message: Record<string, unknown>): Promise<void> {
   if (typeof message.taskId !== "string" || typeof message.subscriberId !== "string") {
     send(session, { type: "error", message: "invalid cancel-subscription message" });
     return;
   }
 
-  void detachSubscriber(runtime, session, message.taskId, message.subscriberId, true);
+  const result = await detachSubscriber(runtime, session, message.taskId, message.subscriberId, true);
+  if (result.detached) {
+    send(session, {
+      type: "subscription-detached",
+      taskId: message.taskId,
+      subscriberId: message.subscriberId,
+      remainingSubscribers: result.remainingSubscribers,
+      taskStillRunning: result.taskStillRunning,
+    });
+  }
+
   refreshIdleTimer(runtime);
 }
 
@@ -338,7 +348,8 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
     return;
   }
 
-  const cwd = await normalizeCwd(message.cwd);
+  const requestedCwd = message.cwd;
+  const cwd = await normalizeCwd(requestedCwd);
   if (runtime.stopped || session.closed || !runtime.sessions.has(session) || !session.authed) {
     return;
   }
@@ -385,7 +396,7 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
     subscriberId: result.subscriberId,
     merged: result.merged,
     executionCwd: snapshot.canonicalExecutionCwd,
-    requestedCwd: cwd,
+    requestedCwd,
   });
 
   if (result.merged) {
@@ -462,10 +473,14 @@ async function detachSubscriber(
   taskId: string,
   subscriberId: string,
   notifyDetachingSession: boolean,
-): Promise<void> {
+): Promise<{ detached: boolean; remainingSubscribers: number; taskStillRunning: boolean }> {
   const expectedSubscriberId = session.subscriptions.get(taskId);
   if (expectedSubscriberId !== subscriberId) {
-    return;
+    return {
+      detached: false,
+      remainingSubscribers: 0,
+      taskStillRunning: false,
+    };
   }
 
   const detached = runtime.taskManager.detachSubscriber(taskId, subscriberId);
@@ -474,11 +489,17 @@ async function detachSubscriber(
 
   if (!detached) {
     removeTaskSession(runtime, taskId, session);
-    return;
+    return {
+      detached: false,
+      remainingSubscribers: 0,
+      taskStillRunning: false,
+    };
   }
 
   const taskState = runtime.taskStates.get(taskId);
   const snapshot = findTask(runtime, taskId);
+  const remainingSubscribers = snapshot?.subscriberCount ?? 0;
+  const taskStillRunning = snapshot?.status === "queued" || snapshot?.status === "running";
 
   if (snapshot?.status === "canceled") {
     if (taskState) {
@@ -491,7 +512,11 @@ async function detachSubscriber(
       removeTaskSession(runtime, taskId, session);
       emitCancelled(runtime, taskState);
       drainScheduler(runtime, toSchedulerTask(taskState));
-      return;
+      return {
+        detached: true,
+        remainingSubscribers,
+        taskStillRunning,
+      };
     }
 
     if (notifyDetachingSession) {
@@ -500,6 +525,11 @@ async function detachSubscriber(
   }
 
   removeTaskSession(runtime, taskId, session);
+  return {
+    detached: true,
+    remainingSubscribers,
+    taskStillRunning,
+  };
 }
 
 async function evictSessionForHeartbeat(runtime: ServerRuntime, session: Session): Promise<void> {
