@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -11,6 +11,7 @@ import {
   removeRegistration,
   writeRegistration,
   type Registration,
+  type StartupLock,
 } from "../src/registry";
 
 const tempDirs: string[] = [];
@@ -37,6 +38,31 @@ function createRegistration(overrides: Partial<Registration> = {}): Registration
   };
 }
 
+function createLock(overrides: Partial<StartupLock> = {}): StartupLock {
+  return {
+    pid: process.pid,
+    acquiredAt: 100,
+    ownerId: "owner-1",
+    ...overrides,
+  };
+}
+
+test("missing registration files return null explicitly", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "server", "registration.json");
+
+  expect(await readRegistration(filePath)).toBeNull();
+});
+
+test("corrupt or partial registration files are treated as unavailable", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "server", "registration.json");
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, '{"pid":123,"token":"partial"', "utf8");
+
+  expect(await readRegistration(filePath)).toBeNull();
+});
+
 test("writes, reads, and removes registration files", async () => {
   const dir = await createTempDir();
   const filePath = join(dir, "server", "registration.json");
@@ -49,6 +75,18 @@ test("writes, reads, and removes registration files", async () => {
   await removeRegistration(filePath);
 
   expect(await readRegistration(filePath)).toBeNull();
+});
+
+test("writes registration atomically without leaving temp files behind", async () => {
+  const dir = await createTempDir();
+  const parentDir = join(dir, "server");
+  const filePath = join(parentDir, "registration.json");
+  const registration = createRegistration();
+
+  await writeRegistration(filePath, registration);
+
+  expect(await readFile(filePath, "utf8")).toBe(JSON.stringify(registration));
+  expect((await readdir(parentDir)).filter((entry) => entry.startsWith("registration.json.") && entry.endsWith(".tmp"))).toEqual([]);
 });
 
 test("treats registrations as stale when coordinator connection fails", () => {
@@ -116,44 +154,46 @@ test("treats registrations as stale when the protocol version does not match", (
   ).toBe(true);
 });
 
-test("acquires and releases startup locks", async () => {
+test("acquires and releases startup locks with explicit ownership", async () => {
   const dir = await createTempDir();
   const filePath = join(dir, "locks", "startup.lock");
 
-  expect(
-    await acquireStartupLock(filePath, {
-      pid: process.pid,
-      acquiredAt: 100,
-      staleAfterMs: 1_000,
-    }),
-  ).toBe(true);
+  const firstOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 100,
+    staleAfterMs: 1_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "owner-1",
+  });
+  expect(firstOwner).toEqual(createLock());
 
   expect(
     await acquireStartupLock(filePath, {
       pid: process.pid,
       acquiredAt: 200,
       staleAfterMs: 1_000,
+      startupTimeoutMs: 1_000,
+      ownerId: "owner-2",
+      coordinatorAvailable: () => true,
     }),
-  ).toBe(false);
+  ).toBeNull();
 
-  await releaseStartupLock(filePath);
+  expect(await releaseStartupLock(filePath, firstOwner!)).toBe(true);
 
-  expect(
-    await acquireStartupLock(filePath, {
-      pid: process.pid,
-      acquiredAt: 300,
-      staleAfterMs: 1_000,
-    }),
-  ).toBe(true);
+  const secondOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 300,
+    staleAfterMs: 1_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "owner-3",
+  });
+  expect(secondOwner).toEqual(createLock({ acquiredAt: 300, ownerId: "owner-3" }));
 });
 
 test("treats locks as stale after the timeout", () => {
   expect(
     isStaleLock(
-      {
-        pid: process.pid,
-        acquiredAt: 100,
-      },
+      createLock(),
       {
         pidExists: true,
         now: 1_500,
@@ -168,10 +208,7 @@ test("treats locks as stale after the timeout", () => {
 test("treats locks as stale when the lock holder pid is gone", () => {
   expect(
     isStaleLock(
-      {
-        pid: 999_999,
-        acquiredAt: 100,
-      },
+      createLock({ pid: 999_999 }),
       {
         pidExists: false,
         now: 150,
@@ -186,10 +223,7 @@ test("treats locks as stale when the lock holder pid is gone", () => {
 test("treats locks as stale when startup timed out without a usable coordinator", () => {
   expect(
     isStaleLock(
-      {
-        pid: process.pid,
-        acquiredAt: 100,
-      },
+      createLock(),
       {
         pidExists: true,
         now: 1_500,
@@ -205,33 +239,93 @@ test("retries bootstrap when an existing startup lock timed out", async () => {
   const dir = await createTempDir();
   const filePath = join(dir, "locks", "startup.lock");
   await mkdir(dirname(filePath), { recursive: true });
-  await Bun.write(filePath, JSON.stringify({ pid: process.pid, acquiredAt: 100 }));
+  await writeFile(filePath, JSON.stringify(createLock()), "utf8");
 
-  expect(
-    await acquireStartupLock(filePath, {
-      pid: process.pid,
-      acquiredAt: 1_500,
-      staleAfterMs: 10_000,
-      startupTimeoutMs: 1_000,
-      coordinatorAvailable: () => false,
-    }),
-  ).toBe(true);
+  const newOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 1_500,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "owner-2",
+    coordinatorAvailable: () => false,
+  });
+
+  expect(newOwner).toEqual(createLock({ acquiredAt: 1_500, ownerId: "owner-2" }));
+  expect(await readFile(filePath, "utf8")).toBe(
+    JSON.stringify(createLock({ acquiredAt: 1_500, ownerId: "owner-2" })),
+  );
 });
 
 test("replaces a startup lock left by a dead process", async () => {
   const dir = await createTempDir();
   const filePath = join(dir, "locks", "startup.lock");
   await mkdir(dirname(filePath), { recursive: true });
-  await Bun.write(filePath, JSON.stringify({ pid: 999_999, acquiredAt: 100 }));
+  await writeFile(filePath, JSON.stringify(createLock({ pid: 999_999, ownerId: "dead-owner" })), "utf8");
 
-  expect(
-    await acquireStartupLock(filePath, {
-      pid: process.pid,
-      acquiredAt: 200,
-      staleAfterMs: 10_000,
-      startupTimeoutMs: 1_000,
-      pidExists: (pid) => pid === process.pid,
-      coordinatorAvailable: () => false,
-    }),
-  ).toBe(true);
+  const newOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 200,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "owner-2",
+    pidExists: (pid) => pid === process.pid,
+    coordinatorAvailable: () => false,
+  });
+
+  expect(newOwner).toEqual(createLock({ acquiredAt: 200, ownerId: "owner-2" }));
+});
+
+test("contested stale takeover must not clobber a newer lock", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "locks", "startup.lock");
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(createLock({ pid: 999_999, ownerId: "stale-owner" })), "utf8");
+
+  const firstTakeover = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 200,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "fresh-owner",
+    pidExists: (pid) => pid === process.pid,
+    coordinatorAvailable: () => false,
+  });
+  const contestedTakeover = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 300,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "contender-owner",
+    coordinatorAvailable: () => true,
+  });
+
+  expect(firstTakeover).toEqual(createLock({ acquiredAt: 200, ownerId: "fresh-owner" }));
+  expect(contestedTakeover).toBeNull();
+  expect(await readFile(filePath, "utf8")).toBe(
+    JSON.stringify(createLock({ acquiredAt: 200, ownerId: "fresh-owner" })),
+  );
+});
+
+test("stale owner cleanup must not delete a newer lock", async () => {
+  const dir = await createTempDir();
+  const filePath = join(dir, "locks", "startup.lock");
+  const oldOwner = createLock({ pid: 999_999, ownerId: "stale-owner" });
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(oldOwner), "utf8");
+
+  const newOwner = await acquireStartupLock(filePath, {
+    pid: process.pid,
+    acquiredAt: 200,
+    staleAfterMs: 10_000,
+    startupTimeoutMs: 1_000,
+    ownerId: "fresh-owner",
+    pidExists: (pid) => pid === process.pid,
+    coordinatorAvailable: () => false,
+  });
+
+  expect(await releaseStartupLock(filePath, oldOwner)).toBe(false);
+  expect(await readFile(filePath, "utf8")).toBe(
+    JSON.stringify(createLock({ acquiredAt: 200, ownerId: "fresh-owner" })),
+  );
+  expect(newOwner).toEqual(createLock({ acquiredAt: 200, ownerId: "fresh-owner" }));
 });

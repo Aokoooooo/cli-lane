@@ -1,5 +1,6 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 export type Registration = {
   pid: number;
@@ -20,6 +21,7 @@ export type RegistrationHealth = {
 export type StartupLock = {
   pid: number;
   acquiredAt: number;
+  ownerId: string;
 };
 
 export type StartupLockState = {
@@ -30,12 +32,20 @@ export type StartupLockState = {
   coordinatorAvailable: boolean;
 };
 
-export type AcquireStartupLockOptions = StartupLock & {
+export type AcquireStartupLockOptions = {
+  pid: number;
+  acquiredAt: number;
   staleAfterMs: number;
   startupTimeoutMs: number;
+  ownerId?: string;
   now?: number;
   pidExists?: (pid: number) => boolean;
   coordinatorAvailable?: () => boolean;
+};
+
+type LockFileRecord = {
+  raw: string;
+  lock: StartupLock | null;
 };
 
 export async function readRegistration(filePath: string): Promise<Registration | null> {
@@ -44,7 +54,15 @@ export async function readRegistration(filePath: string): Promise<Registration |
 
 export async function writeRegistration(filePath: string, registration: Registration): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(registration), "utf8");
+
+  const tempPath = createTempPath(filePath);
+  try {
+    await writeFile(tempPath, JSON.stringify(registration), "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
 }
 
 export async function removeRegistration(filePath: string): Promise<void> {
@@ -74,43 +92,102 @@ export function isStaleLock(lock: StartupLock, state: StartupLockState): boolean
 export async function acquireStartupLock(
   filePath: string,
   options: AcquireStartupLockOptions,
-): Promise<boolean> {
+): Promise<StartupLock | null> {
   await mkdir(dirname(filePath), { recursive: true });
 
   const nextLock: StartupLock = {
     pid: options.pid,
     acquiredAt: options.acquiredAt,
+    ownerId: options.ownerId ?? randomUUID(),
   };
 
-  if (await tryWriteLock(filePath, nextLock)) {
-    return true;
+  if (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) {
+    return nextLock;
   }
 
-  const currentLock = await readJsonFile<StartupLock>(filePath);
-  if (
-    currentLock !== null &&
-    !isStaleLock(currentLock, {
-      pidExists: (options.pidExists ?? defaultPidExists)(currentLock.pid),
-      now: options.now ?? options.acquiredAt,
-      staleAfterMs: options.staleAfterMs,
-      startupTimeoutMs: options.startupTimeoutMs,
-      coordinatorAvailable: (options.coordinatorAvailable ?? (() => false))(),
-    })
-  ) {
-    return false;
-  }
+  return withMutationGuard(filePath, async () => {
+    const currentRecord = await readLockFileRecord(filePath);
+    if (currentRecord === null) {
+      return (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) ? nextLock : null;
+    }
 
-  await rm(filePath, { force: true });
-  return tryWriteLock(filePath, nextLock);
+    if (
+      currentRecord.lock !== null &&
+      !isStaleLock(currentRecord.lock, {
+        pidExists: (options.pidExists ?? defaultPidExists)(currentRecord.lock.pid),
+        now: options.now ?? options.acquiredAt,
+        staleAfterMs: options.staleAfterMs,
+        startupTimeoutMs: options.startupTimeoutMs,
+        coordinatorAvailable: (options.coordinatorAvailable ?? (() => false))(),
+      })
+    ) {
+      return null;
+    }
+
+    const latestRecord = await readLockFileRecord(filePath);
+    if (latestRecord === null) {
+      return (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) ? nextLock : null;
+    }
+
+    if (latestRecord.raw !== currentRecord.raw) {
+      return null;
+    }
+
+    await rm(filePath, { force: true });
+    return (await tryWriteExclusive(filePath, JSON.stringify(nextLock))) ? nextLock : null;
+  });
 }
 
-export async function releaseStartupLock(filePath: string): Promise<void> {
-  await rm(filePath, { force: true });
+export async function releaseStartupLock(filePath: string, owner: StartupLock): Promise<boolean> {
+  return withMutationGuard(filePath, async () => {
+    const currentRecord = await readLockFileRecord(filePath);
+    if (currentRecord === null || currentRecord.lock === null) {
+      return false;
+    }
+
+    if (!isSameLockOwner(currentRecord.lock, owner)) {
+      return false;
+    }
+
+    const latestRecord = await readLockFileRecord(filePath);
+    if (latestRecord === null || latestRecord.raw !== currentRecord.raw) {
+      return false;
+    }
+
+    await rm(filePath, { force: true });
+    return true;
+  });
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  const raw = await readTextFile(filePath);
+  if (raw === null) {
+    return null;
+  }
+
   try {
-    return JSON.parse(await readFile(filePath, "utf8")) as T;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function readLockFileRecord(filePath: string): Promise<LockFileRecord | null> {
+  const raw = await readTextFile(filePath);
+  if (raw === null) {
+    return null;
+  }
+
+  try {
+    return { raw, lock: JSON.parse(raw) as StartupLock };
+  } catch {
+    return { raw, lock: null };
+  }
+}
+
+async function readTextFile(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, "utf8");
   } catch (error) {
     if (isMissingFileError(error)) {
       return null;
@@ -120,9 +197,9 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function tryWriteLock(filePath: string, lock: StartupLock): Promise<boolean> {
+async function tryWriteExclusive(filePath: string, contents: string): Promise<boolean> {
   try {
-    await writeFile(filePath, JSON.stringify(lock), {
+    await writeFile(filePath, contents, {
       encoding: "utf8",
       flag: "wx",
     });
@@ -136,6 +213,28 @@ async function tryWriteLock(filePath: string, lock: StartupLock): Promise<boolea
   }
 }
 
+async function withMutationGuard<T>(filePath: string, action: () => Promise<T>): Promise<T> {
+  const guardPath = `${filePath}.guard`;
+
+  while (!(await tryWriteExclusive(guardPath, String(process.pid)))) {
+    await sleep(5);
+  }
+
+  try {
+    return await action();
+  } finally {
+    await rm(guardPath, { force: true });
+  }
+}
+
+function createTempPath(filePath: string): string {
+  return join(dirname(filePath), `${filePath.split("/").pop() ?? "file"}.${randomUUID()}.tmp`);
+}
+
+function isSameLockOwner(left: StartupLock, right: StartupLock): boolean {
+  return left.pid === right.pid && left.acquiredAt === right.acquiredAt && left.ownerId === right.ownerId;
+}
+
 function defaultPidExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -143,6 +242,10 @@ function defaultPidExists(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
