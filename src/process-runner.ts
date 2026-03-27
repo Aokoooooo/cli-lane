@@ -14,7 +14,7 @@ export type RunProcessResult = {
   stderr: string;
 };
 
-const DEFAULT_GRACE_MS = 100;
+const DEFAULT_GRACE_MS = 3_000;
 
 export async function runProcess({
   cwd,
@@ -47,8 +47,21 @@ export async function runProcess({
     onStderr?.(chunk);
   });
 
+  let rejectTerminationFailure: ((error: unknown) => void) | null = null;
+  const terminationFailure = new Promise<never>((_, reject) => {
+    rejectTerminationFailure = reject;
+  });
+  let terminationTask: Promise<void> | null = null;
+
   const abortHandler = () => {
-    void terminateProcess(proc, graceMs);
+    if (terminationTask) {
+      return;
+    }
+
+    terminationTask = terminateProcess(proc, graceMs);
+    terminationTask.catch((error) => {
+      rejectTerminationFailure?.(error);
+    });
   };
 
   if (signal) {
@@ -60,8 +73,8 @@ export async function runProcess({
   }
 
   try {
-    await proc.exited;
-    await Promise.all([stdoutTask, stderrTask]);
+    await Promise.race([proc.exited, terminationFailure]);
+    await Promise.all([stdoutTask, stderrTask, terminationTask ?? Promise.resolve()]);
   } finally {
     signal?.removeEventListener("abort", abortHandler);
   }
@@ -80,7 +93,16 @@ export async function terminateProcess(proc: Bun.Subprocess, graceMs: number): P
     return;
   }
 
-  proc.kill();
+  try {
+    proc.kill();
+  } catch (error) {
+    if (hasExited(proc)) {
+      await proc.exited;
+      return;
+    }
+
+    throw error;
+  }
 
   const exitedGracefully = await Promise.race([
     proc.exited.then(() => true),
@@ -88,7 +110,13 @@ export async function terminateProcess(proc: Bun.Subprocess, graceMs: number): P
   ]);
 
   if (!exitedGracefully && !hasExited(proc)) {
-    proc.kill("SIGKILL");
+    try {
+      proc.kill("SIGKILL");
+    } catch (error) {
+      if (!hasExited(proc)) {
+        throw error;
+      }
+    }
   }
 
   await proc.exited;
