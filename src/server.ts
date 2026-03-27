@@ -42,9 +42,11 @@ type Session = {
   socket: any;
   buffer: string;
   authed: boolean;
+  closed: boolean;
   subscriptions: Map<string, string>;
   replays: Map<string, ReplayState>;
   heartbeatTimer: Timer | null;
+  handshakeTimer: Timer | null;
 };
 
 type TaskRuntimeState = {
@@ -73,6 +75,7 @@ type ServerRuntime = {
   maxBufferedOutputBytes: number;
   idleTimer: Timer | null;
   stopServer: (() => Promise<void>) | null;
+  handshakeTimeoutMs: number;
 };
 
 const DEFAULT_SERVER_VERSION = "0.1.0";
@@ -80,6 +83,7 @@ const DEFAULT_TERMINATE_GRACE_MS = 3_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 1_000;
 
 export async function startServer(options: StartServerOptions): Promise<CoordinatorServer> {
   await mkdir(options.runtimeDir, { recursive: true });
@@ -101,6 +105,7 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     maxBufferedOutputBytes: options.maxBufferedOutputBytes ?? DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
     idleTimer: null,
     stopServer: null,
+    handshakeTimeoutMs: DEFAULT_HANDSHAKE_TIMEOUT_MS,
   };
 
   const server = Bun.listen({
@@ -112,13 +117,16 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
           socket,
           buffer: "",
           authed: false,
+          closed: false,
           subscriptions: new Map(),
           replays: new Map(),
           heartbeatTimer: null,
+          handshakeTimer: null,
         };
 
         runtime.sessions.add(session);
         runtime.sessionBySocket.set(socket, session);
+        refreshHandshakeTimer(runtime, session);
         refreshIdleTimer(runtime);
       },
       data(socket: object, chunk: string | Uint8Array) {
@@ -141,6 +149,8 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
           return;
         }
 
+        session.closed = true;
+        clearHandshakeTimer(session);
         runtime.sessions.delete(session);
         void detachSession(runtime, session).finally(() => {
           refreshIdleTimer(runtime);
@@ -192,6 +202,9 @@ export async function startServer(options: StartServerOptions): Promise<Coordina
     }
 
     for (const session of runtime.sessions) {
+      session.closed = true;
+      clearHandshakeTimer(session);
+      clearHeartbeatTimer(session);
       session.socket.end?.();
       session.socket.terminate?.();
       session.socket.close?.();
@@ -280,6 +293,7 @@ async function handleHello(runtime: ServerRuntime, session: Session, message: Re
   }
 
   session.authed = true;
+  clearHandshakeTimer(session);
   refreshHeartbeatTimer(runtime, session);
   send(session, {
     type: "hello-ack",
@@ -325,6 +339,10 @@ async function handleRun(runtime: ServerRuntime, session: Session, message: RunM
   }
 
   const cwd = await normalizeCwd(message.cwd);
+  if (runtime.stopped || session.closed || !runtime.sessions.has(session) || !session.authed) {
+    return;
+  }
+
   const mergeMode: TaskMergeMode = message.mergeMode === "global" || message.mergeMode === "off" ? message.mergeMode : "by-cwd";
   const serialMode = message.serialMode === "by-cwd" ? "by-cwd" : "global";
   const result = runtime.taskManager.createOrAttach({
@@ -491,6 +509,7 @@ async function evictSessionForHeartbeat(runtime: ServerRuntime, session: Session
 
   await detachSessionWithMode(runtime, session, true);
   runtime.sessions.delete(session);
+  session.closed = true;
   session.socket.end?.();
   setTimeout(() => {
     session.socket.destroy?.();
@@ -681,7 +700,8 @@ function refreshIdleTimer(runtime: ServerRuntime): void {
     return;
   }
 
-  const idle = runtime.sessions.size === 0 && runtime.taskManager.listActiveTasks().length === 0;
+  const authedSessionCount = Array.from(runtime.sessions).filter((session) => session.authed).length;
+  const idle = authedSessionCount === 0 && runtime.taskManager.listActiveTasks().length === 0;
   if (!idle) {
     clearIdleTimer(runtime);
     return;
@@ -704,6 +724,22 @@ function refreshHeartbeatTimer(runtime: ServerRuntime, session: Session): void {
   }, runtime.heartbeatTimeoutMs);
 }
 
+function refreshHandshakeTimer(runtime: ServerRuntime, session: Session): void {
+  clearHandshakeTimer(session);
+  session.handshakeTimer = setTimeout(() => {
+    if (session.authed || session.closed || runtime.stopped || !runtime.sessions.has(session)) {
+      return;
+    }
+
+    runtime.sessions.delete(session);
+    session.closed = true;
+    session.socket.end?.();
+    session.socket.terminate?.();
+    session.socket.close?.();
+    refreshIdleTimer(runtime);
+  }, runtime.handshakeTimeoutMs);
+}
+
 function clearHeartbeatTimer(session: Session): void {
   if (session.heartbeatTimer === null) {
     return;
@@ -711,6 +747,15 @@ function clearHeartbeatTimer(session: Session): void {
 
   clearTimeout(session.heartbeatTimer);
   session.heartbeatTimer = null;
+}
+
+function clearHandshakeTimer(session: Session): void {
+  if (session.handshakeTimer === null) {
+    return;
+  }
+
+  clearTimeout(session.handshakeTimer);
+  session.handshakeTimer = null;
 }
 
 function clearIdleTimer(runtime: ServerRuntime): void {

@@ -25,6 +25,7 @@ type ServerSession = {
   send: (message: unknown) => void;
   nextMessage: () => Promise<unknown>;
   close: () => Promise<void>;
+  closed: Promise<void>;
 };
 
 async function nextMessageWithin(session: ServerSession, timeoutMs = 1_000): Promise<unknown> {
@@ -58,6 +59,9 @@ async function connectToServer(port: number): Promise<ServerSession> {
   const queue: unknown[] = [];
   const waiters: Array<(message: unknown) => void> = [];
   let buffer = "";
+  const closed = new Promise<void>((resolve) => {
+    socket.once("close", () => resolve());
+  });
 
   socket.setEncoding("utf8");
 
@@ -107,6 +111,7 @@ async function connectToServer(port: number): Promise<ServerSession> {
         }, 25);
       });
     },
+    closed,
   };
 }
 
@@ -1018,4 +1023,71 @@ test("missed heartbeats detach the attached subscriber and auto-cancel the task"
   } finally {
     await server.stop();
   }
+});
+
+test("disconnecting during run normalization does not leave a zombie subscriber", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({ runtimeDir, idleTimeoutMs: 5_000 });
+
+  try {
+    const session = await connectToServer(server.port);
+    session.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(session);
+
+    session.send({
+      type: "run",
+      requestId: "req-zombie",
+      cwd: join(process.cwd(), ".", "test", ".."),
+      argv: ["bun", "-e", "setTimeout(() => process.exit(0), 250);"],
+      serialMode: "global",
+      mergeMode: "by-cwd",
+    });
+
+    await session.close();
+
+    const inspector = await connectToServer(server.port);
+    inspector.send({
+      type: "hello",
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: "1.0.0",
+    });
+    await nextMessageWithin(inspector);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    inspector.send({ type: "ps", requestId: "ps-zombie" });
+    expect(await nextMessageWithin(inspector)).toEqual({
+      type: "ps-result",
+      requestId: "ps-zombie",
+      tasks: [],
+    });
+
+    await inspector.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("unauthenticated connections time out and do not block idle shutdown", async () => {
+  const runtimeDir = await createTempDir();
+  const server = await startServer({
+    runtimeDir,
+    idleTimeoutMs: 50,
+    heartbeatTimeoutMs: 500,
+  });
+
+  const session = await connectToServer(server.port);
+
+  await expect(session.closed).resolves.toBeUndefined();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  expect(await readRegistration(server.registrationPath)).toBeNull();
+  await expect(connectToServer(server.port)).rejects.toThrow();
+  await server.stop();
 });
