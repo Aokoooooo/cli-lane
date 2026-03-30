@@ -130,7 +130,7 @@ test('can update the requested cwd for an existing subscriber', () => {
   ])
 })
 
-test('mergeMode=by-cwd also merges onto a running task', () => {
+test('mergeMode=by-cwd creates a fresh queued task when matching task is already running', () => {
   const manager = new TaskManager()
 
   const first = manager.createOrAttach(
@@ -142,8 +142,8 @@ test('mergeMode=by-cwd also merges onto a running task', () => {
     request({ cwd: '/work/a', argv: ['bun', 'run'], mergeMode: 'by-cwd' }),
   )
 
-  expect(second.merged).toBe(true)
-  expect(second.taskId).toBe(first.taskId)
+  expect(second.merged).toBe(false)
+  expect(second.taskId).not.toBe(first.taskId)
   expect(manager.listActiveTasks()).toEqual([
     {
       taskId: first.taskId,
@@ -152,7 +152,16 @@ test('mergeMode=by-cwd also merges onto a running task', () => {
       status: 'running',
       requestedCwds: ['/work/a'],
       canonicalExecutionCwd: '/work/a',
-      subscriberCount: 2,
+      subscriberCount: 1,
+    },
+    {
+      taskId: second.taskId,
+      argv: ['bun', 'run'],
+      mergeMode: 'by-cwd',
+      status: 'queued',
+      requestedCwds: ['/work/a'],
+      canonicalExecutionCwd: '/work/a',
+      subscriberCount: 1,
     },
   ])
 })

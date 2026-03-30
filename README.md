@@ -59,6 +59,10 @@ Merge mode controls whether identical requests share one underlying execution:
 - `global` merges by command arguments across directories
 - `off` disables merging
 
+Merging only applies to queued tasks. If a matching task is already running,
+`cli-lane` creates a fresh queued task instead of attaching the new request to
+the in-flight execution.
+
 Example:
 
 ```bash

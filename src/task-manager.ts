@@ -282,7 +282,9 @@ export class TaskManager {
   }
 
   private isMergeable(task: TaskRecord): boolean {
-    return task.status === 'queued' || task.status === 'running'
+    // Only queued work is mergeable. Once a task is running, later requests
+    // must queue behind it as their own task instead of joining mid-flight.
+    return task.status === 'queued'
   }
 
   private removeMergeIndex(task: TaskRecord): void {

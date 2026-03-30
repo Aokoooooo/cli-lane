@@ -202,7 +202,7 @@ test('cancels a running task through cancel-task', async () => {
   }
 })
 
-test('replays buffered output to a late-joining merged subscriber', async () => {
+test('does not replay running output to a late-joining request that becomes a fresh queued task', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({ runtimeDir })
 
@@ -293,76 +293,23 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
     expect(acceptedB).toEqual({
       type: 'accepted',
       requestId: 'req-b',
-      taskId: (acceptedA as { taskId: string }).taskId,
+      taskId: expect.any(String),
       subscriberId: expect.any(String),
-      merged: true,
+      merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
       inheritedOutputPreferences: false,
     })
+    expect((acceptedB as { taskId: string }).taskId).not.toBe(
+      (acceptedA as { taskId: string }).taskId,
+    )
 
-    expect(
-      await waitForMessage(
-        sessionB,
-        (message) =>
-          typeof message === 'object' &&
-          message !== null &&
-          'type' in message &&
-          (message as { type?: string }).type === 'task-event' &&
-          typeof (
-            message as unknown as {
-              event?: { type?: string; data?: string; replay?: boolean }
-            }
-          ).event === 'object' &&
-          (
-            message as unknown as {
-              event: { type?: string; data?: string; replay?: boolean }
-            }
-          ).event.type === 'stdout' &&
-          (message as unknown as { event: { data?: string; replay?: boolean } })
-            .event.data === 'first\n' &&
-          (message as unknown as { event: { replay?: boolean } }).event
-            .replay === true,
-      ),
-    ).toEqual({
+    expect(await nextMessageWithin(sessionB)).toEqual({
       type: 'task-event',
-      taskId: (acceptedA as { taskId: string }).taskId,
+      taskId: (acceptedB as { taskId: string }).taskId,
       event: {
-        type: 'stdout',
-        data: 'first\n',
-        replay: true,
-        seq: 1,
-        ts: expect.any(Number),
-        bytes: Buffer.byteLength('first\n'),
-      },
-    })
-
-    expect(
-      await waitForMessage(
-        sessionB,
-        (message) =>
-          typeof message === 'object' &&
-          message !== null &&
-          'type' in message &&
-          (message as { type?: string }).type === 'task-event' &&
-          typeof (
-            message as unknown as { event?: { type?: string; data?: string } }
-          ).event === 'object' &&
-          (message as unknown as { event: { type?: string; data?: string } })
-            .event.type === 'stderr' &&
-          (message as unknown as { event: { data?: string } }).event.data ===
-            'err\n',
-      ),
-    ).toEqual({
-      type: 'task-event',
-      taskId: (acceptedA as { taskId: string }).taskId,
-      event: {
-        type: 'stderr',
-        data: 'err\n',
-        replay: false,
-        seq: 2,
-        ts: expect.any(Number),
-        bytes: Buffer.byteLength('err\n'),
+        type: 'queued',
+        position: 2,
       },
     })
 
@@ -463,7 +410,7 @@ test('run output preferences override coordinator color env', async () => {
   }
 })
 
-test('accepted message exposes execution cwd and requested cwd for global merges', async () => {
+test('accepted message exposes execution cwd and requested cwd for a fresh queued global task', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({ runtimeDir })
 
@@ -517,16 +464,20 @@ test('accepted message exposes execution cwd and requested cwd for global merges
       mergeMode: 'global',
     })
 
-    expect(await nextMessageWithin(sessionB)).toEqual({
+    const acceptedB = await nextMessageWithin(sessionB)
+    expect(acceptedB).toEqual({
       type: 'accepted',
       requestId: 'req-global-b',
-      taskId: (acceptedA as { taskId: string }).taskId,
+      taskId: expect.any(String),
       subscriberId: expect.any(String),
-      merged: true,
+      merged: false,
       executionCwd: process.cwd(),
       requestedCwd: otherCwd,
       inheritedOutputPreferences: false,
     })
+    expect((acceptedB as { taskId: string }).taskId).not.toBe(
+      (acceptedA as { taskId: string }).taskId,
+    )
 
     await sessionA.close()
     await sessionB.close()
@@ -672,18 +623,16 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
 
     sessionA.send({
       type: 'run',
-      requestId: 'req-a',
+      requestId: 'req-blocker',
       cwd: process.cwd(),
-      argv: ['bun', '-e', 'setInterval(() => {}, 1000);'],
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
       serialMode: 'global',
-      mergeMode: 'by-cwd',
+      mergeMode: 'off',
     })
 
-    const acceptedA = (await nextMessageWithin(sessionA)) as {
+    const blockerAccepted = (await nextMessageWithin(sessionA)) as {
       taskId: string
-      subscriberId: string
     }
-
     await waitForMessage(
       sessionA,
       (message) =>
@@ -696,6 +645,20 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
         (message as unknown as { event: { type?: string } }).event.type ===
           'started',
     )
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'req-a',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setInterval(() => {}, 1000);'],
+      serialMode: 'global',
+      mergeMode: 'by-cwd',
+    })
+
+    const acceptedA = (await nextMessageWithin(sessionA)) as {
+      taskId: string
+      subscriberId: string
+    }
 
     const sessionB = await connectToServer(server.port)
     sessionB.send({
@@ -721,11 +684,21 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
     }
 
     expect(acceptedB.taskId).toBe(acceptedA.taskId)
+    expect(acceptedB.subscriberId).not.toBe(acceptedA.subscriberId)
 
     sessionB.send({
       type: 'cancel-subscription',
       taskId: acceptedB.taskId,
       subscriberId: acceptedB.subscriberId,
+    })
+
+    expect(await nextMessageWithin(sessionB)).toEqual({
+      type: 'task-event',
+      taskId: acceptedB.taskId,
+      event: {
+        type: 'queued',
+        position: 2,
+      },
     })
 
     expect(await nextMessageWithin(sessionB)).toEqual({
@@ -752,12 +725,21 @@ test('cancel-subscription detaches only the targeted subscriber', async () => {
       requestId: 'ps-still-running',
       tasks: [
         {
-          taskId: acceptedA.taskId,
+          taskId: blockerAccepted.taskId,
           status: 'running',
+          cwd: process.cwd(),
+          argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+          subscriberCount: 1,
+          merged: false,
+        },
+        {
+          taskId: acceptedA.taskId,
+          status: 'queued',
           cwd: process.cwd(),
           argv: ['bun', '-e', 'setInterval(() => {}, 1000);'],
           subscriberCount: 1,
           merged: false,
+          queuePosition: 2,
         },
       ],
     })
@@ -1112,6 +1094,13 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
   try {
     await client.run({
       cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+      serialMode: 'global',
+      mergeMode: 'off',
+    })
+
+    await client.run({
+      cwd: process.cwd(),
       argv: ['bun', '-e', 'setInterval(() => {}, 1000);'],
       serialMode: 'global',
       mergeMode: 'by-cwd',
@@ -1165,6 +1154,13 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
   })
 
   try {
+    await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+      serialMode: 'global',
+      mergeMode: 'off',
+    })
+
     const first = await client.run({
       cwd: process.cwd(),
       argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
@@ -1193,7 +1189,7 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
   }
 })
 
-test('createClient returns inherited output preferences for a running merged task', async () => {
+test('createClient creates a fresh queued task when a matching task is already running', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({
     runtimeDir,
@@ -1228,7 +1224,7 @@ test('createClient returns inherited output preferences for a running merged tas
       )
     }, 1_000)
 
-    const merged = await client.run({
+    const queued = await client.run({
       cwd: process.cwd(),
       argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
       serialMode: 'global',
@@ -1239,33 +1235,44 @@ test('createClient returns inherited output preferences for a running merged tas
       },
     })
 
-    expect(merged).toEqual({
+    expect(queued).toEqual({
       type: 'accepted',
       requestId: expect.any(String),
-      taskId: first.taskId,
-      subscriberId: first.subscriberId,
-      merged: true,
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
-      inheritedOutputPreferences: true,
+      inheritedOutputPreferences: false,
+    })
+    expect(queued.taskId).not.toBe(first.taskId)
+    expect(queued.subscriberId).not.toBe(first.subscriberId)
+    expect(notices).toContainEqual({
+      type: 'notice',
+      kind: 'queued',
+      message: expect.stringContaining('queued at position 2'),
+      taskId: queued.taskId,
+      position: 2,
     })
 
-    await waitForCondition(
-      () =>
-        notices.some(
-          (notice) =>
-            notice.kind === 'merged-output-preferences' &&
-            notice.taskId === first.taskId,
-        ),
-      1_000,
-    )
+    await waitForCondition(async () => {
+      const ps = await client.ps()
+      return (
+        ps.tasks.some(
+          (task) => task.taskId === first.taskId && task.status === 'running',
+        ) &&
+        ps.tasks.some(
+          (task) => task.taskId === queued.taskId && task.status === 'queued',
+        )
+      )
+    }, 1_000)
   } finally {
     await client.close()
     await server.stop()
   }
 })
 
-test('createClient treats explicit noColor=false as different from inherited noColor on a running merged task', async () => {
+test('createClient keeps a second request separate even when output preferences differ on a running task', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({
     runtimeDir,
@@ -1304,7 +1311,7 @@ test('createClient treats explicit noColor=false as different from inherited noC
       )
     }, 1_000)
 
-    const merged = await client.run({
+    const queued = await client.run({
       cwd: process.cwd(),
       argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
       serialMode: 'global',
@@ -1316,33 +1323,32 @@ test('createClient treats explicit noColor=false as different from inherited noC
       },
     })
 
-    expect(merged).toEqual({
+    expect(queued).toEqual({
       type: 'accepted',
       requestId: expect.any(String),
-      taskId: first.taskId,
-      subscriberId: first.subscriberId,
-      merged: true,
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
-      inheritedOutputPreferences: true,
+      inheritedOutputPreferences: false,
     })
-
-    await waitForCondition(
-      () =>
-        notices.some(
-          (notice) =>
-            notice.kind === 'merged-output-preferences' &&
-            notice.taskId === first.taskId,
-        ),
-      1_000,
-    )
+    expect(queued.taskId).not.toBe(first.taskId)
+    expect(queued.subscriberId).not.toBe(first.subscriberId)
+    expect(notices).toContainEqual({
+      type: 'notice',
+      kind: 'queued',
+      message: expect.stringContaining('queued at position 2'),
+      taskId: queued.taskId,
+      position: 2,
+    })
   } finally {
     await client.close()
     await server.stop()
   }
 })
 
-test('same session merged rerun does not replay output it already consumed', async () => {
+test('same session rerun while task is running creates a queued task without replaying running output', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({
     runtimeDir,
@@ -1412,7 +1418,7 @@ test('same session merged rerun does not replay output it already consumed', asy
         term: 'xterm-256color',
       },
     })
-    const merged = await waitForMessage(
+    const queued = await waitForMessage(
       session,
       (message) =>
         typeof message === 'object' &&
@@ -1422,16 +1428,19 @@ test('same session merged rerun does not replay output it already consumed', asy
         (message as { requestId?: string }).requestId === 'second',
     )
 
-    expect(merged).toEqual({
+    expect(queued).toEqual({
       type: 'accepted',
       requestId: 'second',
-      taskId: (first as { taskId: string }).taskId,
-      subscriberId: (first as { subscriberId: string }).subscriberId,
-      merged: true,
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
-      inheritedOutputPreferences: true,
+      inheritedOutputPreferences: false,
     })
+    expect((queued as { taskId: string }).taskId).not.toBe(
+      (first as { taskId: string }).taskId,
+    )
 
     const messages: ServerToClient[] = []
     while (true) {
@@ -1473,74 +1482,16 @@ test('same session merged rerun does not replay output it already consumed', asy
       },
     ])
 
+    expect(
+      messages.some(
+        (message) =>
+          message.type === 'task-event' &&
+          message.taskId === (queued as { taskId: string }).taskId &&
+          message.event.type === 'stdout',
+      ),
+    ).toBe(false)
+
     await session.close()
-  } finally {
-    await server.stop()
-  }
-})
-
-test('client close detaches a reused merged subscription without leaving a task behind', async () => {
-  const runtimeDir = await createTempDir()
-  const server = await startServer({
-    runtimeDir,
-    terminateGraceMs: 50,
-    heartbeatTimeoutMs: 5_000,
-  })
-
-  const client = await createClient({
-    runtimeDir,
-    heartbeatIntervalMs: 20,
-  })
-
-  try {
-    const first = await client.run({
-      cwd: process.cwd(),
-      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 500);'],
-      serialMode: 'global',
-      mergeMode: 'global',
-      output: {
-        isTTY: false,
-      },
-    })
-
-    await waitForCondition(async () => {
-      const ps = await client.ps()
-      return ps.tasks.some(
-        (task) => task.taskId === first.taskId && task.status === 'running',
-      )
-    }, 1_000)
-
-    const merged = await client.run({
-      cwd: process.cwd(),
-      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 500);'],
-      serialMode: 'global',
-      mergeMode: 'global',
-      output: {
-        isTTY: true,
-        term: 'xterm-256color',
-      },
-    })
-
-    expect(merged.taskId).toBe(first.taskId)
-    expect(merged.subscriberId).toBe(first.subscriberId)
-    expect(merged.inheritedOutputPreferences).toBe(true)
-
-    await client.close()
-
-    const inspector = await createClient({
-      runtimeDir,
-      heartbeatIntervalMs: 20,
-      bootstrapIfMissing: false,
-    })
-
-    try {
-      await waitForCondition(async () => {
-        const ps = await inspector.ps()
-        return ps.tasks.length === 0
-      }, 1_000)
-    } finally {
-      await inspector.close()
-    }
   } finally {
     await server.stop()
   }
@@ -1675,7 +1626,7 @@ test('queued merged task notifies earlier subscribers when a later merge overrid
   }
 })
 
-test('createClient surfaces cwd mismatch and merged output preference notices together for a running merged task', async () => {
+test('createClient does not surface merged output preference notice for a fresh queued task', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({
     runtimeDir,
@@ -1711,7 +1662,7 @@ test('createClient surfaces cwd mismatch and merged output preference notices to
       )
     }, 1_000)
 
-    await client.run({
+    const queued = await client.run({
       cwd: alternateCwd,
       argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
       serialMode: 'global',
@@ -1722,21 +1673,22 @@ test('createClient surfaces cwd mismatch and merged output preference notices to
       },
     })
 
-    expect(notices).toContainEqual({
-      type: 'notice',
-      kind: 'cwd-mismatch',
-      message: expect.stringContaining('executing in'),
-      taskId: first.taskId,
-      executionCwd: process.cwd(),
-      requestedCwd: alternateCwd,
-    })
+    expect(queued.merged).toBe(false)
+    expect(queued.taskId).not.toBe(first.taskId)
 
     expect(notices).toContainEqual({
       type: 'notice',
-      kind: 'merged-output-preferences',
-      message: expect.stringContaining('output preferences'),
-      taskId: first.taskId,
+      kind: 'queued',
+      message: expect.stringContaining('queued at position 2'),
+      taskId: queued.taskId,
+      position: 2,
     })
+
+    expect(
+      notices.some(
+        (notice) => notice.kind === 'merged-output-preferences',
+      ),
+    ).toBe(false)
   } finally {
     await client.close()
     await server.stop()
