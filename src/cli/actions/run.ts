@@ -44,11 +44,13 @@ export async function runCommand(
         routeRunMessage(message, activeTaskId, stdout, stderr, finish)
       },
     })
+    const output = detectOutputPreferences(stdout, stderr, config.env)
     const accepted = await client.run({
       cwd: parsed.cwd,
       argv: parsed.argv,
       serialMode: parsed.serialMode,
       mergeMode: parsed.mergeMode,
+      output,
     })
 
     activeTaskId = accepted.taskId
@@ -92,6 +94,7 @@ async function runDirectCommand(
   const result = await runProcess({
     cwd: parsed.cwd,
     argv: parsed.argv,
+    output: detectOutputPreferences(stdout, stderr, process.env),
     onStdout(chunk) {
       stdout.write(chunk)
     },
@@ -105,6 +108,55 @@ async function runDirectCommand(
   }
 
   return result.code ?? 1
+}
+
+function detectOutputPreferences(
+  stdout: { write(chunk: string): unknown },
+  _stderr: { write(chunk: string): unknown },
+  env: Record<string, string | undefined>,
+): {
+  isTTY: boolean
+  term?: string
+  noColor?: boolean
+  env?: Record<string, string>
+} {
+  const stdoutIsTTY =
+    'isTTY' in stdout && typeof stdout.isTTY === 'boolean' && stdout.isTTY
+
+  return {
+    isTTY: stdoutIsTTY,
+    term: stdoutIsTTY ? env.TERM : undefined,
+    noColor: env.NO_COLOR !== undefined ? true : undefined,
+    env: collectOutputEnv(env, { isTTY: stdoutIsTTY }),
+  }
+}
+
+function collectOutputEnv(
+  env: Record<string, string | undefined>,
+  options: { isTTY: boolean },
+): Record<string, string> | undefined {
+  if (!options.isTTY) {
+    return undefined
+  }
+
+  const allowedKeys = [
+    'COLORTERM',
+    'CLICOLOR',
+    'CLICOLOR_FORCE',
+    'FORCE_COLOR',
+    'TERM_PROGRAM',
+    'TERM_PROGRAM_VERSION',
+  ] as const
+  const selected: Record<string, string> = {}
+
+  for (const key of allowedKeys) {
+    const value = env[key]
+    if (value !== undefined) {
+      selected[key] = value
+    }
+  }
+
+  return Object.keys(selected).length > 0 ? selected : undefined
 }
 
 function routeRunMessage(

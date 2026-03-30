@@ -260,6 +260,40 @@ test('cli run surfaces a cwd mismatch notice for global merges', async () => {
   }
 })
 
+test('cli run does not force tty output when only stderr is interactive', async () => {
+  const runtimeDir = await createTempDir()
+  const stdout = createCapturedWriter({ isTTY: false })
+  const stderr = createCapturedWriter({ isTTY: true })
+
+  const exitCode = await runCli(
+    [
+      'run',
+      '--',
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM,no:process.env.NO_COLOR,colorTerm:process.env.COLORTERM,termProgram:process.env.TERM_PROGRAM}) + '\\n')",
+    ],
+    {
+      env: {
+        CLI_LANE_RUNTIME_DIR: runtimeDir,
+        COLORTERM: 'truecolor',
+        FORCE_COLOR: '1',
+        TERM: 'xterm-256color',
+        TERM_PROGRAM: 'WarpTerminal',
+      },
+      stdout,
+      stderr,
+    },
+  )
+
+  expect(exitCode).toBe(0)
+  expect(JSON.parse(stdout.toString()).force).toBeUndefined()
+  expect(JSON.parse(stdout.toString()).term).toBeUndefined()
+  expect(JSON.parse(stdout.toString()).colorTerm).toBeUndefined()
+  expect(JSON.parse(stdout.toString()).termProgram).toBeUndefined()
+  expect(stderr.toString()).toBe('')
+})
+
 test('cli run forwards child --help instead of printing cli help', async () => {
   const runtimeDir = await createTempDir()
   const stdout = createCapturedWriter()

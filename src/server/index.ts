@@ -44,6 +44,7 @@ import type { ServerRuntime, Session, TaskRuntimeState } from './types'
 
 export type StartServerOptions = {
   runtimeDir: string
+  childProcessEnv?: Record<string, string | undefined>
   serverVersion?: string
   terminateGraceMs?: number
   idleTimeoutMs?: number
@@ -82,6 +83,7 @@ export async function startServer(
     sessionBySocket: new WeakMap(),
     stopped: false,
     registrationToken: '',
+    childProcessEnv: options.childProcessEnv,
     terminateGraceMs: options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS,
     idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
     heartbeatTimeoutMs:
@@ -368,7 +370,8 @@ async function handleRun(
     typeof message.cwd !== 'string' ||
     !Array.isArray(message.argv) ||
     message.argv.length === 0 ||
-    message.argv.some((entry) => typeof entry !== 'string')
+    message.argv.some((entry) => typeof entry !== 'string') ||
+    !isValidRunOutput(message.output)
   ) {
     send(session, {
       type: 'error',
@@ -391,6 +394,7 @@ async function handleRun(
 
   const mergeMode: TaskMergeMode = normalizeMergeMode(message.mergeMode)
   const serialMode = normalizeSerialMode(message.serialMode)
+  const existingSubscriberId = session.subscriptions.get(resultTaskIdHint(cwd, message.argv, mergeMode, runtime, session))
   const result = runtime.taskManager.createOrAttach({
     cwd,
     argv: message.argv,
@@ -414,6 +418,8 @@ async function handleRun(
       serialMode,
       mergeMode,
       serialKey: resolveSerialKey(serialMode, cwd),
+      subscriberOutputs: new Map([[result.subscriberId, message.output]]),
+      output: message.output,
       controller: new AbortController(),
       buffer: new OutputBuffer(runtime.maxBufferedOutputBytes),
       terminalEventSent: false,
@@ -423,22 +429,64 @@ async function handleRun(
     const schedulerTask = toSchedulerTask(taskState)
     runtime.scheduler.enqueue(schedulerTask)
     enqueueLaneTask(runtime, taskState)
+  } else {
+    const reusableSubscriberId =
+      result.merged && existingSubscriberId ? existingSubscriberId : null
+    if (reusableSubscriberId) {
+      runtime.taskManager.detachSubscriber(result.taskId, result.subscriberId)
+      runtime.taskManager.updateSubscriberRequestedCwd(
+        result.taskId,
+        reusableSubscriberId,
+        requestedCwd,
+      )
+      taskState.subscriberOutputs.delete(reusableSubscriberId)
+      taskState.subscriberOutputs.set(reusableSubscriberId, message.output)
+      if (snapshot.status === 'queued') {
+        taskState.output = message.output
+      }
+    } else {
+      taskState.subscriberOutputs.delete(result.subscriberId)
+      taskState.subscriberOutputs.set(result.subscriberId, message.output)
+      if (snapshot.status === 'queued') {
+        taskState.output = message.output
+      }
+    }
   }
 
-  session.subscriptions.set(result.taskId, result.subscriberId)
+  const subscriberId =
+    result.merged && existingSubscriberId ? existingSubscriberId : result.subscriberId
+  const reusedSubscriber =
+    result.merged && existingSubscriberId === subscriberId
+
+  session.subscriptions.set(result.taskId, subscriberId)
   addTaskSession(runtime, result.taskId, session)
+
+  const inheritedOutputPreferences =
+    result.merged &&
+    snapshot.status === 'running' &&
+    !sameOutputPreferences(taskState.output, message.output)
 
   send(session, {
     type: 'accepted',
     requestId: message.requestId,
     taskId: result.taskId,
-    subscriberId: result.subscriberId,
+    subscriberId,
     merged: result.merged,
     executionCwd: snapshot.canonicalExecutionCwd,
     requestedCwd,
+    inheritedOutputPreferences,
   })
 
-  if (result.merged) {
+  if (inheritedOutputPreferences) {
+    send(session, {
+      type: 'notice',
+      kind: 'merged-output-preferences',
+      message: `Task ${result.taskId} is reusing the output preferences from the effective merged subscriber for this run.`,
+      taskId: result.taskId,
+    })
+  }
+
+  if (result.merged && !reusedSubscriber) {
     replayBufferedOutput(session, result.taskId, taskState.buffer)
   }
 
@@ -565,6 +613,12 @@ async function detachSubscriber(
   const remainingSubscribers = snapshot?.subscriberCount ?? 0
   const taskStillRunning =
     snapshot?.status === 'queued' || snapshot?.status === 'running'
+  if (taskState) {
+    taskState.subscriberOutputs.delete(subscriberId)
+    if (snapshot?.status === 'queued') {
+      taskState.output = latestRequestedOutput(taskState.subscriberOutputs)
+    }
+  }
 
   if (snapshot?.status === 'canceled') {
     if (taskState) {
@@ -639,12 +693,14 @@ async function startTask(
     return
   }
 
+  notifyInheritedOutputPreferences(runtime, taskId, taskState)
   broadcastTaskEvent(runtime, taskId, { type: 'started' })
-
   try {
     const result = await runProcess({
       cwd: snapshot.canonicalExecutionCwd,
       argv: snapshot.argv,
+      env: runtime.childProcessEnv,
+      output: taskState.output,
       signal: taskState.controller.signal,
       graceMs: runtime.terminateGraceMs,
       onStdout(chunk) {
@@ -672,6 +728,165 @@ async function startTask(
     })
     refreshIdleTimer(runtime)
   }
+}
+
+function isValidRunOutput(
+  output: RunMessage['output'],
+): output is RunMessage['output'] {
+  return (
+    output === undefined ||
+    (typeof output === 'object' &&
+      output !== null &&
+      typeof output.isTTY === 'boolean' &&
+      (output.term === undefined || typeof output.term === 'string') &&
+      (output.noColor === undefined || typeof output.noColor === 'boolean') &&
+      isValidOutputEnv(output.env))
+  )
+}
+
+function isValidOutputEnv(env: Record<string, string> | undefined): boolean {
+  if (env === undefined) {
+    return true
+  }
+
+  if (typeof env !== 'object' || env === null) {
+    return false
+  }
+
+  for (const [key, value] of Object.entries(env)) {
+    if (!ALLOWED_OUTPUT_ENV_KEYS.has(key) || typeof value !== 'string') {
+      return false
+    }
+  }
+
+  return true
+}
+
+const ALLOWED_OUTPUT_ENV_KEYS = new Set([
+  'COLORTERM',
+  'CLICOLOR',
+  'CLICOLOR_FORCE',
+  'FORCE_COLOR',
+  'TERM_PROGRAM',
+  'TERM_PROGRAM_VERSION',
+])
+
+function sameOutputPreferences(
+  left: TaskRuntimeState['output'] | RunMessage['output'],
+  right: TaskRuntimeState['output'] | RunMessage['output'],
+): boolean {
+  return (
+    normalizeOutputPreferences(left) === normalizeOutputPreferences(right)
+  )
+}
+
+function normalizeOutputPreferences(
+  output: TaskRuntimeState['output'] | RunMessage['output'],
+): string {
+  if (!output) {
+    return 'undefined'
+  }
+
+  const normalizedEnv = Object.fromEntries(
+    Object.entries(output.env ?? {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  )
+
+  return JSON.stringify({
+    isTTY: output.isTTY,
+    term: output.term,
+    noColor: output.noColor,
+    env: normalizedEnv,
+  })
+}
+
+function notifyInheritedOutputPreferences(
+  runtime: ServerRuntime,
+  taskId: string,
+  taskState: TaskRuntimeState,
+): void {
+  const sessions = runtime.taskSessions.get(taskId)
+  if (!sessions) {
+    return
+  }
+
+  for (const session of sessions) {
+    const subscriberId = session.subscriptions.get(taskId)
+    if (!subscriberId) {
+      continue
+    }
+
+    const requestedOutput = taskState.subscriberOutputs.get(subscriberId)
+    if (sameOutputPreferences(requestedOutput, taskState.output)) {
+      continue
+    }
+
+    send(session, {
+      type: 'notice',
+      kind: 'merged-output-preferences',
+      message: `Task ${taskId} is reusing the output preferences from the effective merged subscriber for this run.`,
+      taskId,
+    })
+  }
+}
+
+function resultTaskIdHint(
+  cwd: string,
+  argv: string[],
+  mergeMode: TaskMergeMode,
+  runtime: ServerRuntime,
+  session: Session,
+): string {
+  if (mergeMode === 'off') {
+    return ''
+  }
+
+  for (const taskId of session.subscriptions.keys()) {
+    const snapshot = findTask(runtime, taskId)
+    if (!snapshot) {
+      continue
+    }
+
+    if (snapshot.status !== 'queued' && snapshot.status !== 'running') {
+      continue
+    }
+
+    if (snapshot.mergeMode !== mergeMode) {
+      continue
+    }
+
+    if (!sameArgv(snapshot.argv, argv)) {
+      continue
+    }
+
+    if (mergeMode === 'by-cwd' && snapshot.canonicalExecutionCwd !== cwd) {
+      continue
+    }
+
+    return taskId
+  }
+
+  return ''
+}
+
+function sameArgv(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  )
+}
+
+function latestRequestedOutput(
+  subscriberOutputs: Map<string, RunMessage['output']>,
+): RunMessage['output'] {
+  let latest: RunMessage['output'] = undefined
+
+  for (const output of subscriberOutputs.values()) {
+    latest = output
+  }
+
+  return latest
 }
 
 function drainScheduler(

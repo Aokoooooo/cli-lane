@@ -129,6 +129,23 @@ export class TaskManager {
     return true
   }
 
+  updateSubscriberRequestedCwd(
+    taskId: string,
+    subscriberId: string,
+    requestedCwd: string,
+  ): boolean {
+    this.pruneExpiredFinishedTasks()
+
+    const task = this.tasks.get(taskId)
+    const subscriber = task?.subscribers.get(subscriberId)
+    if (!subscriber) {
+      return false
+    }
+
+    subscriber.requestedCwd = requestedCwd
+    return true
+  }
+
   cancelTask(taskId: string): boolean {
     this.pruneExpiredFinishedTasks()
 

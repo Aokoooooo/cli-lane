@@ -54,6 +54,7 @@ export async function createClient(options: ClientOptions): Promise<Client> {
         argv: [...request.argv],
         serialMode: request.serialMode ?? 'global',
         mergeMode: request.mergeMode ?? 'by-cwd',
+        output: request.output,
       })
     },
     ps() {

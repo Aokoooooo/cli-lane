@@ -9,6 +9,7 @@ export type MergeMode = 'global' | 'by-cwd' | 'off'
 export type CliConfig = {
   runtimeDir: string
   defaultCwd: string
+  env: Record<string, string | undefined>
   serialMode: SerialMode
   mergeMode: MergeMode
   clientVersion: string
@@ -26,6 +27,7 @@ export function loadConfig(
   return {
     runtimeDir: env.CLI_LANE_RUNTIME_DIR ?? defaultRuntimeDirForCwd(cwd),
     defaultCwd: cwd,
+    env: { ...env },
     serialMode: parseSerialMode(env.CLI_LANE_SERIAL_MODE),
     mergeMode: parseMergeMode(env.CLI_LANE_MERGE_MODE),
     clientVersion: env.CLI_LANE_CLIENT_VERSION ?? DEFAULT_CLIENT_VERSION,

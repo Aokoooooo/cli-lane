@@ -1,5 +1,5 @@
 import type { OutputBuffer } from '../output-buffer'
-import type { ServerToClient } from '../protocol'
+import type { RunMessage, ServerToClient } from '../protocol'
 import type { Scheduler } from '../scheduler'
 import type { TaskManager } from '../task-manager'
 import type { TaskMergeModeValue, TaskSerialMode } from '../task-routing'
@@ -25,6 +25,13 @@ export type TaskRuntimeState = {
   serialMode: TaskSerialMode
   mergeMode: TaskMergeModeValue
   serialKey: string
+  subscriberOutputs: Map<string, RunMessage['output']>
+  output?: {
+    isTTY: boolean
+    term?: string
+    noColor?: boolean
+    env?: Record<string, string>
+  }
   controller: AbortController
   buffer: OutputBuffer
   terminalEventSent: boolean
@@ -40,6 +47,7 @@ export type ServerRuntime = {
   sessionBySocket: WeakMap<object, Session>
   stopped: boolean
   registrationToken: string
+  childProcessEnv?: Record<string, string | undefined>
   terminateGraceMs: number
   idleTimeoutMs: number | null
   heartbeatTimeoutMs: number

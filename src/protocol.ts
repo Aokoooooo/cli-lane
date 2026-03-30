@@ -55,6 +55,12 @@ export type RunMessage = {
   argv: string[]
   serialMode: 'global' | 'by-cwd'
   mergeMode: 'by-cwd' | 'global' | 'off'
+  output?: {
+    isTTY: boolean
+    term?: string
+    noColor?: boolean
+    env?: Record<string, string>
+  }
 }
 
 export type CancelSubscriptionMessage = {
@@ -81,6 +87,14 @@ export type AcceptedMessage = {
   merged: boolean
   executionCwd: string
   requestedCwd: string
+  inheritedOutputPreferences?: boolean
+}
+
+export type NoticeMessage = {
+  type: 'notice'
+  kind: 'merged-output-preferences'
+  message: string
+  taskId: string
 }
 
 export type TaskEventMessage = {
@@ -133,6 +147,7 @@ export type ServerToClient =
   | HelloAckMessage
   | HeartbeatAckMessage
   | AcceptedMessage
+  | NoticeMessage
   | TaskEventMessage
   | SubscriptionDetachedMessage
   | PsResultMessage

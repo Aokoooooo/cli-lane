@@ -3,6 +3,13 @@ import { sleep } from './timing'
 export type RunProcessOptions = {
   cwd: string
   argv: string[]
+  env?: Record<string, string | undefined>
+  output?: {
+    isTTY: boolean
+    term?: string
+    noColor?: boolean
+    env?: Record<string, string>
+  }
   onStdout?: (chunk: string) => void
   onStderr?: (chunk: string) => void
   signal?: AbortSignal
@@ -21,6 +28,8 @@ const DEFAULT_GRACE_MS = 3_000
 export async function runProcess({
   cwd,
   argv,
+  env,
+  output,
   onStdout,
   onStderr,
   signal,
@@ -35,6 +44,7 @@ export async function runProcess({
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
+    env: buildChildEnv(env, output),
   })
 
   let stdout = ''
@@ -170,6 +180,112 @@ async function readStream(
     reader.releaseLock()
   }
 }
+
+function buildChildEnv(
+  envOverrides: Record<string, string | undefined> | undefined,
+  output:
+    | {
+        isTTY: boolean
+        term?: string
+        noColor?: boolean
+        env?: Record<string, string>
+      }
+    | undefined,
+): Record<string, string> {
+  const env = buildBaseEnv(envOverrides)
+
+  if (output) {
+    applyOutputPreferences(env, output)
+  }
+
+  return env
+}
+
+function buildBaseEnv(
+  envOverrides: Record<string, string | undefined> | undefined,
+): Record<string, string> {
+  const env: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value
+    }
+  }
+
+  for (const [key, value] of Object.entries(envOverrides ?? {})) {
+    if (value === undefined) {
+      delete env[key]
+      continue
+    }
+
+    env[key] = value
+  }
+
+  return env
+}
+
+function applyOutputPreferences(
+  env: Record<string, string>,
+  output: {
+    isTTY: boolean
+    term?: string
+    noColor?: boolean
+    env?: Record<string, string>
+  },
+): void {
+  for (const key of OUTPUT_ENV_RESET_KEYS) {
+    delete env[key]
+  }
+
+  if (output.noColor === false) {
+    delete env.NO_COLOR
+  }
+
+  if (output.term) {
+    env.TERM = output.term
+  } else if (output.isTTY && !env.TERM) {
+    env.TERM = 'xterm-256color'
+  }
+
+  for (const [key, value] of Object.entries(output.env ?? {})) {
+    env[key] = value
+  }
+
+  if (output.noColor) {
+    env.NO_COLOR = '1'
+    env.CLICOLOR = '0'
+    delete env.CLICOLOR_FORCE
+    delete env.FORCE_COLOR
+    return
+  }
+
+  if (env.NO_COLOR !== undefined) {
+    return
+  }
+
+  if (env.FORCE_COLOR !== undefined) {
+    return
+  }
+
+  if (env.CLICOLOR === '0') {
+    delete env.CLICOLOR_FORCE
+    return
+  }
+
+  if (output.isTTY) {
+    env.FORCE_COLOR = '1'
+  }
+}
+
+const OUTPUT_ENV_RESET_KEYS = [
+  'CLICOLOR',
+  'CLICOLOR_FORCE',
+  'COLORTERM',
+  'FORCE_COLOR',
+  'TERM',
+  'TERM_PROGRAM',
+  'TERM_PROGRAM_VERSION',
+] as const
 
 function hasExited(proc: Bun.Subprocess): boolean {
   return proc.exitCode !== null || proc.signalCode !== null

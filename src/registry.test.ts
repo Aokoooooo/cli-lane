@@ -20,6 +20,7 @@ import {
   type StartupLock,
   writeRegistration,
 } from './registry'
+import { protocolVersion } from './protocol'
 
 const tempDirs: string[] = []
 
@@ -44,7 +45,7 @@ function createRegistration(
     token: 'token-1',
     startedAt: 1_700_000_000_000,
     version: '1.0.0',
-    protocolVersion: 1,
+    protocolVersion,
     ...overrides,
   }
 }

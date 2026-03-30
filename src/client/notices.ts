@@ -25,6 +25,12 @@ export type ClientNotice =
       taskId: string
       position: number
     }
+  | {
+      type: 'notice'
+      kind: 'merged-output-preferences'
+      message: string
+      taskId: string
+    }
 
 export function emitNotice(
   onNotice: ((notice: ClientNotice) => void) | undefined,
@@ -46,7 +52,18 @@ export function emitNotice(
       executionCwd: message.executionCwd,
       requestedCwd: message.requestedCwd,
     })
-    return
+  }
+
+  if (
+    message.type === 'notice' &&
+    message.kind === 'merged-output-preferences'
+  ) {
+    onNotice({
+      type: 'notice',
+      kind: 'merged-output-preferences',
+      message: message.message,
+      taskId: message.taskId,
+    })
   }
 
   if (message.type === 'task-event' && message.event.type === 'queued') {

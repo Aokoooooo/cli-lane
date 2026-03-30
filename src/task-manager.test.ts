@@ -106,6 +106,30 @@ test('mergeMode=global merges by argv and keeps the first canonical execution cw
   ])
 })
 
+test('can update the requested cwd for an existing subscriber', () => {
+  const manager = new TaskManager()
+
+  const first = manager.createOrAttach(
+    request({ cwd: '/work/a', argv: ['bun', 'run'], mergeMode: 'global' }),
+  )
+
+  expect(
+    manager.updateSubscriberRequestedCwd(first.taskId, first.subscriberId, '/work/b'),
+  ).toBe(true)
+
+  expect(manager.listTasks()).toEqual([
+    {
+      taskId: first.taskId,
+      argv: ['bun', 'run'],
+      mergeMode: 'global',
+      status: 'queued',
+      requestedCwds: ['/work/b'],
+      canonicalExecutionCwd: '/work/a',
+      subscriberCount: 1,
+    },
+  ])
+})
+
 test('mergeMode=by-cwd also merges onto a running task', () => {
   const manager = new TaskManager()
 

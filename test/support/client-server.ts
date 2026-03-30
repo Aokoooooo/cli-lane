@@ -120,10 +120,11 @@ export function createMessageCollector(): MessageCollector {
   }
 }
 
-export function createCapturedWriter() {
+export function createCapturedWriter(options?: { isTTY?: boolean }) {
   const chunks: string[] = []
 
   return {
+    ...(options?.isTTY === undefined ? {} : { isTTY: options.isTTY }),
     write(chunk: string) {
       chunks.push(chunk)
     },

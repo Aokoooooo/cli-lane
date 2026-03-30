@@ -96,6 +96,7 @@ test('accepts run requests and surfaces active work in ps', async () => {
       merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     session.send({ type: 'ps', requestId: 'ps-1' })
@@ -169,6 +170,7 @@ test('cancels a running task through cancel-task', async () => {
       merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     const started = await session.nextMessage()
@@ -241,6 +243,7 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
       merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     await waitForMessage(
@@ -295,6 +298,7 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
       merged: true,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     expect(
@@ -369,6 +373,96 @@ test('replays buffered output to a late-joining merged subscriber', async () => 
   }
 })
 
+test('run output preferences override coordinator color env', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    childProcessEnv: {
+      NO_COLOR: '1',
+    },
+  })
+
+  try {
+    const session = await connectToServer(server.port)
+    session.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(session)
+
+    session.send({
+      type: 'run',
+      requestId: 'req-output-prefs',
+      cwd: process.cwd(),
+      argv: [
+        'bun',
+        '-e',
+        "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM,no:process.env.NO_COLOR,colorTerm:process.env.COLORTERM,termProgram:process.env.TERM_PROGRAM}) + '\\n'); process.exit(0);",
+      ],
+      serialMode: 'global',
+      mergeMode: 'off',
+      output: {
+        isTTY: true,
+        term: 'screen-256color',
+        noColor: false,
+        env: {
+          COLORTERM: 'truecolor',
+          TERM_PROGRAM: 'WarpTerminal',
+        },
+      },
+    })
+
+    const accepted = await nextMessageWithin(session)
+    expect(accepted).toEqual({
+      type: 'accepted',
+      requestId: 'req-output-prefs',
+      taskId: expect.any(String),
+      subscriberId: expect.any(String),
+      merged: false,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
+    })
+
+    expect(
+      await waitForMessage(
+        session,
+        (message) =>
+          typeof message === 'object' &&
+          message !== null &&
+          'type' in message &&
+          (message as { type?: string }).type === 'task-event' &&
+          (message as { taskId?: string }).taskId ===
+            (accepted as { taskId: string }).taskId &&
+          (message as unknown as { event?: { type?: string; data?: string } })
+            .event?.type === 'stdout' &&
+          (message as unknown as { event?: { data?: string } }).event?.data?.includes(
+            '"termProgram":"WarpTerminal"',
+          ) === true,
+      ),
+    ).toEqual({
+      type: 'task-event',
+      taskId: (accepted as { taskId: string }).taskId,
+      event: {
+        type: 'stdout',
+        data: '{"force":"1","term":"screen-256color","colorTerm":"truecolor","termProgram":"WarpTerminal"}\n',
+        seq: 1,
+        ts: expect.any(Number),
+        bytes: Buffer.byteLength(
+          '{"force":"1","term":"screen-256color","colorTerm":"truecolor","termProgram":"WarpTerminal"}\n',
+        ),
+        replay: false,
+      },
+    })
+
+    await session.close()
+  } finally {
+    await server.stop()
+  }
+})
+
 test('accepted message exposes execution cwd and requested cwd for global merges', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({ runtimeDir })
@@ -401,6 +495,7 @@ test('accepted message exposes execution cwd and requested cwd for global merges
       merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     const otherCwd = `${process.cwd()}/./test/..`
@@ -430,6 +525,7 @@ test('accepted message exposes execution cwd and requested cwd for global merges
       merged: true,
       executionCwd: process.cwd(),
       requestedCwd: otherCwd,
+      inheritedOutputPreferences: false,
     })
 
     await sessionA.close()
@@ -907,6 +1003,7 @@ test('createClient can run commands and detach subscriptions explicitly', async 
       merged: false,
       executionCwd: process.cwd(),
       requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
     })
 
     expect(
@@ -999,12 +1096,16 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
     heartbeatTimeoutMs: 5_000,
   })
 
-  const notices: ClientNotice[] = []
+  const secondNotices: ClientNotice[] = []
   const client = await createClient({
     runtimeDir,
     heartbeatIntervalMs: 20,
+  })
+  const secondClient = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
     onNotice(notice) {
-      notices.push(notice)
+      secondNotices.push(notice)
     },
   })
 
@@ -1016,20 +1117,20 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
       mergeMode: 'by-cwd',
     })
 
-    const merged = await client.run({
+    const merged = await secondClient.run({
       cwd: process.cwd(),
       argv: ['bun', '-e', 'setInterval(() => {}, 1000);'],
       serialMode: 'global',
       mergeMode: 'by-cwd',
     })
 
-    const detached = await client.cancelSubscription(
+    const detached = await secondClient.cancelSubscription(
       merged.taskId,
       merged.subscriberId,
     )
     expect(detached.taskStillRunning).toBe(true)
     expect(detached.remainingSubscribers).toBe(1)
-    expect(notices).toContainEqual({
+    expect(secondNotices).toContainEqual({
       type: 'notice',
       kind: 'subscription-detached',
       message: expect.stringContaining('Detached from task'),
@@ -1039,6 +1140,7 @@ test('createClient surfaces a notice when explicit detach leaves the task runnin
       taskStillRunning: true,
     })
   } finally {
+    await secondClient.close()
     await client.close()
     await server.stop()
   }
@@ -1091,6 +1193,953 @@ test('createClient surfaces a notice for global merge cwd mismatch', async () =>
   }
 })
 
+test('createClient returns inherited output preferences for a running merged task', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  const notices: ClientNotice[] = []
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice)
+    },
+  })
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+
+    await waitForCondition(async () => {
+      const ps = await client.ps()
+      return ps.tasks.some(
+        (task) => task.taskId === first.taskId && task.status === 'running',
+      )
+    }, 1_000)
+
+    const merged = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    expect(merged).toEqual({
+      type: 'accepted',
+      requestId: expect.any(String),
+      taskId: first.taskId,
+      subscriberId: first.subscriberId,
+      merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+      inheritedOutputPreferences: true,
+    })
+
+    await waitForCondition(
+      () =>
+        notices.some(
+          (notice) =>
+            notice.kind === 'merged-output-preferences' &&
+            notice.taskId === first.taskId,
+        ),
+      1_000,
+    )
+  } finally {
+    await client.close()
+    await server.stop()
+  }
+})
+
+test('createClient treats explicit noColor=false as different from inherited noColor on a running merged task', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    childProcessEnv: {
+      NO_COLOR: '1',
+    },
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  const notices: ClientNotice[] = []
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice)
+    },
+  })
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    await waitForCondition(async () => {
+      const ps = await client.ps()
+      return ps.tasks.some(
+        (task) => task.taskId === first.taskId && task.status === 'running',
+      )
+    }, 1_000)
+
+    const merged = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+        noColor: false,
+      },
+    })
+
+    expect(merged).toEqual({
+      type: 'accepted',
+      requestId: expect.any(String),
+      taskId: first.taskId,
+      subscriberId: first.subscriberId,
+      merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+      inheritedOutputPreferences: true,
+    })
+
+    await waitForCondition(
+      () =>
+        notices.some(
+          (notice) =>
+            notice.kind === 'merged-output-preferences' &&
+            notice.taskId === first.taskId,
+        ),
+      1_000,
+    )
+  } finally {
+    await client.close()
+    await server.stop()
+  }
+})
+
+test('same session merged rerun does not replay output it already consumed', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  try {
+    const session = await connectToServer(server.port)
+    session.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(session)
+
+    const script =
+      "process.stdout.write('A\\n'); setTimeout(() => { process.stdout.write('B\\n'); process.exit(0); }, 150);"
+
+    session.send({
+      type: 'run',
+      requestId: 'first',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', script],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+    const first = await waitForMessage(
+      session,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'first',
+    )
+
+    await waitForMessage(
+      session,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (first as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string; data?: string } })
+          .event?.type === 'stdout' &&
+        (message as unknown as { event?: { data?: string } }).event?.data ===
+          'A\n',
+      1_000,
+    )
+
+    session.send({
+      type: 'run',
+      requestId: 'second',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', script],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+    const merged = await waitForMessage(
+      session,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'second',
+    )
+
+    expect(merged).toEqual({
+      type: 'accepted',
+      requestId: 'second',
+      taskId: (first as { taskId: string }).taskId,
+      subscriberId: (first as { subscriberId: string }).subscriberId,
+      merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+      inheritedOutputPreferences: true,
+    })
+
+    const messages: ServerToClient[] = []
+    while (true) {
+      const message = await nextMessageWithin(session)
+      messages.push(message as ServerToClient)
+      if (
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (first as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string } }).event?.type ===
+          'exited'
+      ) {
+        break
+      }
+    }
+
+    const stdoutEvents = messages.filter(
+      (message): message is Extract<ServerToClient, { type: 'task-event' }> =>
+        message.type === 'task-event' &&
+        message.taskId === (first as { taskId: string }).taskId &&
+        message.event.type === 'stdout',
+    )
+
+    expect(stdoutEvents).toEqual([
+      {
+        type: 'task-event',
+        taskId: (first as { taskId: string }).taskId,
+        event: {
+          type: 'stdout',
+          data: 'B\n',
+          seq: 2,
+          ts: expect.any(Number),
+          bytes: Buffer.byteLength('B\n'),
+          replay: false,
+        },
+      },
+    ])
+
+    await session.close()
+  } finally {
+    await server.stop()
+  }
+})
+
+test('client close detaches a reused merged subscription without leaving a task behind', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+  })
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 500);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+
+    await waitForCondition(async () => {
+      const ps = await client.ps()
+      return ps.tasks.some(
+        (task) => task.taskId === first.taskId && task.status === 'running',
+      )
+    }, 1_000)
+
+    const merged = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 500);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    expect(merged.taskId).toBe(first.taskId)
+    expect(merged.subscriberId).toBe(first.subscriberId)
+    expect(merged.inheritedOutputPreferences).toBe(true)
+
+    await client.close()
+
+    const inspector = await createClient({
+      runtimeDir,
+      heartbeatIntervalMs: 20,
+      bootstrapIfMissing: false,
+    })
+
+    try {
+      await waitForCondition(async () => {
+        const ps = await inspector.ps()
+        return ps.tasks.length === 0
+      }, 1_000)
+    } finally {
+      await inspector.close()
+    }
+  } finally {
+    await server.stop()
+  }
+})
+
+test('queued merged task notifies earlier subscribers when a later merge overrides output preferences', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  try {
+    const sessionA = await connectToServer(server.port)
+    sessionA.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionA)
+
+    const sessionB = await connectToServer(server.port)
+    sessionB.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionB)
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'blocker',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+      serialMode: 'global',
+      mergeMode: 'off',
+      output: {
+        isTTY: false,
+      },
+    })
+    const blocker = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'blocker',
+    )
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'first',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+    const first = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'first',
+    )
+
+    sessionB.send({
+      type: 'run',
+      requestId: 'second',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+    await waitForMessage(
+      sessionB,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'second',
+    )
+
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (blocker as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string } }).event?.type ===
+          'exited',
+    )
+
+    expect(
+      await waitForMessage(
+        sessionA,
+        (message) =>
+          typeof message === 'object' &&
+          message !== null &&
+          'type' in message &&
+          (message as { type?: string }).type === 'notice' &&
+          (message as { taskId?: string }).taskId ===
+            (first as { taskId: string }).taskId,
+      ),
+    ).toEqual({
+      type: 'notice',
+      kind: 'merged-output-preferences',
+      message: expect.stringContaining('output preferences'),
+      taskId: (first as { taskId: string }).taskId,
+    })
+
+    await sessionA.close()
+    await sessionB.close()
+  } finally {
+    await server.stop()
+  }
+})
+
+test('createClient surfaces cwd mismatch and merged output preference notices together for a running merged task', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  const alternateCwd = await createTempDir()
+  const notices: ClientNotice[] = []
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice)
+    },
+  })
+
+  try {
+    const first = await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+
+    await waitForCondition(async () => {
+      const ps = await client.ps()
+      return ps.tasks.some(
+        (task) => task.taskId === first.taskId && task.status === 'running',
+      )
+    }, 1_000)
+
+    await client.run({
+      cwd: alternateCwd,
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    expect(notices).toContainEqual({
+      type: 'notice',
+      kind: 'cwd-mismatch',
+      message: expect.stringContaining('executing in'),
+      taskId: first.taskId,
+      executionCwd: process.cwd(),
+      requestedCwd: alternateCwd,
+    })
+
+    expect(notices).toContainEqual({
+      type: 'notice',
+      kind: 'merged-output-preferences',
+      message: expect.stringContaining('output preferences'),
+      taskId: first.taskId,
+    })
+  } finally {
+    await client.close()
+    await server.stop()
+  }
+})
+
+test('createClient does not surface merged output preference notice when preferences match', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  const notices: ClientNotice[] = []
+  const client = await createClient({
+    runtimeDir,
+    heartbeatIntervalMs: 20,
+    onNotice(notice) {
+      notices.push(notice)
+    },
+  })
+
+  try {
+    await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    await client.run({
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 120);'],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+
+    expect(
+      notices.some((notice) => notice.kind === 'merged-output-preferences'),
+    ).toBe(false)
+  } finally {
+    await client.close()
+    await server.stop()
+  }
+})
+
+test('queued merged task reassigns output preferences when the first subscriber disconnects', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  try {
+    const sessionA = await connectToServer(server.port)
+    sessionA.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionA)
+
+    const sessionB = await connectToServer(server.port)
+    sessionB.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionB)
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'blocker',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+      serialMode: 'global',
+      mergeMode: 'off',
+      output: {
+        isTTY: false,
+      },
+    })
+    const blocker = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'blocker',
+    )
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'first',
+      cwd: process.cwd(),
+      argv: [
+        'bun',
+        '-e',
+        "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM}) + '\\n'); process.exit(0);",
+      ],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+    const first = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'first',
+    )
+
+    sessionB.send({
+      type: 'run',
+      requestId: 'second',
+      cwd: process.cwd(),
+      argv: [
+        'bun',
+        '-e',
+        "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM}) + '\\n'); process.exit(0);",
+      ],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+    const second = await waitForMessage(
+      sessionB,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'second',
+    )
+
+    expect(second).toEqual({
+      type: 'accepted',
+      requestId: 'second',
+      taskId: (first as { taskId: string }).taskId,
+      subscriberId: expect.any(String),
+      merged: true,
+      executionCwd: process.cwd(),
+      requestedCwd: process.cwd(),
+      inheritedOutputPreferences: false,
+    })
+
+    sessionA.send({
+      type: 'cancel-subscription',
+      taskId: (first as { taskId: string }).taskId,
+      subscriberId: (first as { subscriberId: string }).subscriberId,
+    })
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'subscription-detached' &&
+        (message as { taskId?: string }).taskId ===
+          (first as { taskId: string }).taskId,
+    )
+
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (blocker as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string } }).event?.type ===
+          'exited',
+    )
+
+    const stdoutEvent = await waitForMessage(
+      sessionB,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (first as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string; data?: string } })
+          .event?.type === 'stdout' &&
+        (message as unknown as { event?: { data?: string } }).event?.data?.includes(
+          '"term":"xterm-256color"',
+        ) === true,
+    )
+
+    expect(stdoutEvent).toEqual({
+      type: 'task-event',
+      taskId: (first as { taskId: string }).taskId,
+      event: {
+        type: 'stdout',
+        data: expect.any(String),
+        seq: expect.any(Number),
+        ts: expect.any(Number),
+        bytes: expect.any(Number),
+        replay: false,
+      },
+    })
+    expect(
+      JSON.parse(
+        (
+          stdoutEvent as {
+            event: {
+              data: string
+            }
+          }
+        ).event.data,
+      ),
+    ).toEqual({
+      term: 'xterm-256color',
+    })
+
+    await sessionA.close()
+    await sessionB.close()
+  } finally {
+    await server.stop()
+  }
+})
+
+test('queued merged task falls back from a disconnected latest subscriber output preference', async () => {
+  const runtimeDir = await createTempDir()
+  const server = await startServer({
+    runtimeDir,
+    terminateGraceMs: 50,
+    heartbeatTimeoutMs: 5_000,
+  })
+
+  try {
+    const sessionA = await connectToServer(server.port)
+    sessionA.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionA)
+
+    const sessionB = await connectToServer(server.port)
+    sessionB.send({
+      type: 'hello',
+      token: server.registration.token,
+      protocolVersion,
+      clientVersion: '1.0.0',
+    })
+    await nextMessageWithin(sessionB)
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'blocker',
+      cwd: process.cwd(),
+      argv: ['bun', '-e', 'setTimeout(() => process.exit(0), 250);'],
+      serialMode: 'global',
+      mergeMode: 'off',
+      output: {
+        isTTY: false,
+      },
+    })
+    const blocker = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'blocker',
+    )
+
+    sessionA.send({
+      type: 'run',
+      requestId: 'first',
+      cwd: process.cwd(),
+      argv: [
+        'bun',
+        '-e',
+        "process.stdout.write(JSON.stringify({term:process.env.TERM}) + '\\n'); process.exit(0);",
+      ],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: false,
+      },
+    })
+    const first = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'first',
+    )
+
+    sessionB.send({
+      type: 'run',
+      requestId: 'second',
+      cwd: process.cwd(),
+      argv: [
+        'bun',
+        '-e',
+        "process.stdout.write(JSON.stringify({term:process.env.TERM}) + '\\n'); process.exit(0);",
+      ],
+      serialMode: 'global',
+      mergeMode: 'global',
+      output: {
+        isTTY: true,
+        term: 'xterm-256color',
+      },
+    })
+    const second = await waitForMessage(
+      sessionB,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'accepted' &&
+        (message as { requestId?: string }).requestId === 'second',
+    )
+
+    sessionB.send({
+      type: 'cancel-subscription',
+      taskId: (second as { taskId: string }).taskId,
+      subscriberId: (second as { subscriberId: string }).subscriberId,
+    })
+    await waitForMessage(
+      sessionB,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'subscription-detached' &&
+        (message as { taskId?: string }).taskId ===
+          (second as { taskId: string }).taskId,
+    )
+
+    await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (blocker as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string } }).event?.type ===
+          'exited',
+    )
+
+    const stdoutEvent = await waitForMessage(
+      sessionA,
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        (message as { type?: string }).type === 'task-event' &&
+        (message as { taskId?: string }).taskId ===
+          (first as { taskId: string }).taskId &&
+        (message as unknown as { event?: { type?: string; data?: string } })
+          .event?.type === 'stdout',
+    )
+
+    expect(
+      JSON.parse(
+        (
+          stdoutEvent as {
+            event: {
+              data: string
+            }
+          }
+        ).event.data,
+      ),
+    ).toEqual({})
+
+    await sessionA.close()
+    await sessionB.close()
+  } finally {
+    await server.stop()
+  }
+})
+
 test('createClient surfaces a notice when a task is queued', async () => {
   const runtimeDir = await createTempDir()
   const server = await startServer({
@@ -1123,13 +2172,16 @@ test('createClient surfaces a notice when a task is queued', async () => {
       mergeMode: 'by-cwd',
     })
 
-    expect(notices).toContainEqual({
-      type: 'notice',
-      kind: 'queued',
-      message: expect.stringContaining('queued'),
-      taskId: 'task-2',
-      position: 2,
-    })
+    await waitForCondition(
+      () =>
+        notices.some(
+          (notice) =>
+            notice.kind === 'queued' &&
+            notice.taskId === 'task-2' &&
+            notice.position === 2,
+        ),
+      1_000,
+    )
   } finally {
     await client.close()
     await server.stop()

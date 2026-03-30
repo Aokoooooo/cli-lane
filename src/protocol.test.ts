@@ -1,11 +1,16 @@
 import { expect, test } from 'bun:test'
-import { decodeMessageChunk, decodeMessages, encodeMessage } from './protocol'
+import {
+  decodeMessageChunk,
+  decodeMessages,
+  encodeMessage,
+  protocolVersion,
+} from './protocol'
 
 test('encodes and decodes hello messages', () => {
   const raw = encodeMessage({
     type: 'hello',
     token: 'token-1',
-    protocolVersion: 1,
+    protocolVersion,
     clientVersion: '1.0.0',
   })
   const messages = decodeMessages(raw)
@@ -14,7 +19,7 @@ test('encodes and decodes hello messages', () => {
     {
       type: 'hello',
       token: 'token-1',
-      protocolVersion: 1,
+      protocolVersion,
       clientVersion: '1.0.0',
     },
   ])

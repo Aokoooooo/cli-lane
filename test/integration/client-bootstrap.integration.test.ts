@@ -382,7 +382,7 @@ test('connectOrBootstrap keeps registration on protocol mismatch', async () => {
     type: 'hello-ack',
     serverVersion: '0.1.0',
     protocolVersion: protocolVersion + 1,
-  })
+  } as never)
 
   const startCoordinator = vi.fn(async () => {
     throw new Error('startCoordinator should not run')

@@ -33,6 +33,170 @@ test('captures stdout, stderr, callbacks, and exit code', async () => {
   expect(stderrChunks.join('')).toBe(result.stderr)
 })
 
+test('preserves inherited terminal env when output preferences are omitted', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM,no:process.env.NO_COLOR,colorTerm:process.env.COLORTERM}) + '\\n')",
+    ],
+    env: {
+      TERM: 'screen-256color',
+      FORCE_COLOR: '2',
+      NO_COLOR: '1',
+      COLORTERM: 'truecolor',
+    },
+  })
+
+  expect(result.stdout).toContain('"force":"2"')
+  expect(result.stdout).toContain('"term":"screen-256color"')
+  expect(result.stdout).toContain('"no":"1"')
+  expect(result.stdout).toContain('"colorTerm":"truecolor"')
+})
+
+test('defaults child env for non-interactive color-friendly execution', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,term:process.env.TERM,no:process.env.NO_COLOR,colorTerm:process.env.COLORTERM,termProgram:process.env.TERM_PROGRAM}) + '\\n')",
+    ],
+    env: {
+      NO_COLOR: undefined,
+    },
+    output: {
+      isTTY: true,
+      term: 'screen-256color',
+      noColor: false,
+      env: {
+        COLORTERM: 'truecolor',
+        TERM_PROGRAM: 'WarpTerminal',
+      },
+    },
+  })
+
+  expect(result.stdout).toContain('"force":"1"')
+  expect(result.stdout).toContain('"term":"screen-256color"')
+  expect(result.stdout).not.toContain('"no"')
+  expect(result.stdout).toContain('"colorTerm":"truecolor"')
+  expect(result.stdout).toContain('"termProgram":"WarpTerminal"')
+})
+
+test('NO_COLOR overrides force-color style env hints', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,clickolorForce:process.env.CLICOLOR_FORCE,clickolor:process.env.CLICOLOR,no:process.env.NO_COLOR}) + '\\n')",
+    ],
+    output: {
+      isTTY: true,
+      noColor: true,
+      env: {
+        CLICOLOR_FORCE: '1',
+        CLICOLOR: '1',
+      },
+    },
+  })
+
+  expect(result.stdout).toContain('"no":"1"')
+  expect(result.stdout).not.toContain('"force"')
+  expect(result.stdout).not.toContain('"clickolorForce"')
+  expect(result.stdout).toContain('"clickolor":"0"')
+})
+
+test('preserves explicit FORCE_COLOR strength from output preferences', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR}) + '\\n')",
+    ],
+    output: {
+      isTTY: true,
+      env: {
+        FORCE_COLOR: '3',
+      },
+    },
+  })
+
+  expect(result.stdout).toContain('"force":"3"')
+})
+
+test('tty output ignores inherited CLICOLOR=0 when it was not explicitly requested', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,clickolor:process.env.CLICOLOR}) + '\\n')",
+    ],
+    env: {
+      CLICOLOR: '0',
+    },
+    output: {
+      isTTY: true,
+      noColor: false,
+    },
+  })
+
+  expect(result.stdout).toContain('"force":"1"')
+  expect(result.stdout).not.toContain('"clickolor":"0"')
+})
+
+test('explicit CLICOLOR=0 suppresses default FORCE_COLOR for tty output', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,clickolor:process.env.CLICOLOR,no:process.env.NO_COLOR}) + '\\n')",
+    ],
+    env: {
+      NO_COLOR: undefined,
+    },
+    output: {
+      isTTY: true,
+      env: {
+        CLICOLOR: '0',
+      },
+    },
+  })
+
+  expect(result.stdout).not.toContain('"force":"1"')
+  expect(result.stdout).toContain('"clickolor":"0"')
+  expect(result.stdout).not.toContain('"no":"1"')
+})
+
+test('non-tty output preferences clear inherited color forcing env', async () => {
+  const result = await runProcess({
+    cwd: process.cwd(),
+    argv: [
+      'bun',
+      '-e',
+      "process.stdout.write(JSON.stringify({force:process.env.FORCE_COLOR,clickolor:process.env.CLICOLOR,clickolorForce:process.env.CLICOLOR_FORCE,term:process.env.TERM}) + '\\n')",
+    ],
+    env: {
+      FORCE_COLOR: '2',
+      CLICOLOR: '1',
+      CLICOLOR_FORCE: '1',
+      TERM: 'xterm-256color',
+    },
+    output: {
+      isTTY: false,
+    },
+  })
+
+  expect(result.stdout).not.toContain('"force"')
+  expect(result.stdout).not.toContain('"clickolor":"1"')
+  expect(result.stdout).not.toContain('"clickolorForce":"1"')
+  expect(result.stdout).not.toContain('"term":"xterm-256color"')
+})
+
 test('gracefully stops on abort signal', async () => {
   const controller = new AbortController()
   let ready = false
