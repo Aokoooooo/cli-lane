@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { protocolVersion } from './protocol'
 import {
   acquireStartupLock,
   isStaleLock,
@@ -20,7 +21,6 @@ import {
   type StartupLock,
   writeRegistration,
 } from './registry'
-import { protocolVersion } from './protocol'
 
 const tempDirs: string[] = []
 

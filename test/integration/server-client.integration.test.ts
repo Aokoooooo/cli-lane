@@ -2,7 +2,11 @@ import { expect, test, vi } from 'bun:test'
 import { join } from 'node:path'
 import type { ClientNotice } from '../../src/client'
 import { createClient } from '../../src/client'
-import { encodeMessage, protocolVersion } from '../../src/protocol'
+import {
+  encodeMessage,
+  protocolVersion,
+  type ServerToClient,
+} from '../../src/protocol'
 import { readRegistration } from '../../src/registry'
 import { startServer } from '../../src/server'
 import {
@@ -385,9 +389,9 @@ test('run output preferences override coordinator color env', async () => {
             (accepted as { taskId: string }).taskId &&
           (message as unknown as { event?: { type?: string; data?: string } })
             .event?.type === 'stdout' &&
-          (message as unknown as { event?: { data?: string } }).event?.data?.includes(
-            '"termProgram":"WarpTerminal"',
-          ) === true,
+          (
+            message as unknown as { event?: { data?: string } }
+          ).event?.data?.includes('"termProgram":"WarpTerminal"') === true,
       ),
     ).toEqual({
       type: 'task-event',
@@ -1685,9 +1689,7 @@ test('createClient does not surface merged output preference notice for a fresh 
     })
 
     expect(
-      notices.some(
-        (notice) => notice.kind === 'merged-output-preferences',
-      ),
+      notices.some((notice) => notice.kind === 'merged-output-preferences'),
     ).toBe(false)
   } finally {
     await client.close()
@@ -1894,9 +1896,9 @@ test('queued merged task reassigns output preferences when the first subscriber 
           (first as { taskId: string }).taskId &&
         (message as unknown as { event?: { type?: string; data?: string } })
           .event?.type === 'stdout' &&
-        (message as unknown as { event?: { data?: string } }).event?.data?.includes(
-          '"term":"xterm-256color"',
-        ) === true,
+        (
+          message as unknown as { event?: { data?: string } }
+        ).event?.data?.includes('"term":"xterm-256color"') === true,
     )
 
     expect(stdoutEvent).toEqual({

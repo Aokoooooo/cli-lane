@@ -1,8 +1,8 @@
 import { join } from 'node:path'
 import { protocolVersion, type ServerToClient } from '../protocol'
 import {
-  type Registration,
   pidExists,
+  type Registration,
   readRegistration,
   removeRegistration,
 } from '../registry'
@@ -33,7 +33,10 @@ export async function connectOrBootstrap(options: {
         options.onNotice,
       )
     } catch (error) {
-      if (!options.bootstrapIfMissing || !isRegistrationConnectionFailure(error)) {
+      if (
+        !options.bootstrapIfMissing ||
+        !isRegistrationConnectionFailure(error)
+      ) {
         throw error
       }
 

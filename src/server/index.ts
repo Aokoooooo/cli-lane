@@ -394,7 +394,9 @@ async function handleRun(
 
   const mergeMode: TaskMergeMode = normalizeMergeMode(message.mergeMode)
   const serialMode = normalizeSerialMode(message.serialMode)
-  const existingSubscriberId = session.subscriptions.get(resultTaskIdHint(cwd, message.argv, mergeMode, runtime, session))
+  const existingSubscriberId = session.subscriptions.get(
+    resultTaskIdHint(cwd, message.argv, mergeMode, runtime, session),
+  )
   const result = runtime.taskManager.createOrAttach({
     cwd,
     argv: message.argv,
@@ -454,7 +456,9 @@ async function handleRun(
   }
 
   const subscriberId =
-    result.merged && existingSubscriberId ? existingSubscriberId : result.subscriberId
+    result.merged && existingSubscriberId
+      ? existingSubscriberId
+      : result.subscriberId
   const reusedSubscriber =
     result.merged && existingSubscriberId === subscriberId
 
@@ -775,9 +779,7 @@ function sameOutputPreferences(
   left: TaskRuntimeState['output'] | RunMessage['output'],
   right: TaskRuntimeState['output'] | RunMessage['output'],
 ): boolean {
-  return (
-    normalizeOutputPreferences(left) === normalizeOutputPreferences(right)
-  )
+  return normalizeOutputPreferences(left) === normalizeOutputPreferences(right)
 }
 
 function normalizeOutputPreferences(
@@ -880,7 +882,7 @@ function sameArgv(left: string[], right: string[]): boolean {
 function latestRequestedOutput(
   subscriberOutputs: Map<string, RunMessage['output']>,
 ): RunMessage['output'] {
-  let latest: RunMessage['output'] = undefined
+  let latest: RunMessage['output']
 
   for (const output of subscriberOutputs.values()) {
     latest = output

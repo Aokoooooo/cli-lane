@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { mkdir, symlink } from 'node:fs/promises'
 import path from 'node:path'
-import { normalizeCwd, normalizeCwdForKey } from './path-utils'
 import { createTempDir } from '../test/support/client-server'
+import { normalizeCwd, normalizeCwdForKey } from './path-utils'
 
 test('normalizes cwd consistently', async () => {
   const cwd = await normalizeCwd('./')

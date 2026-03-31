@@ -39,22 +39,20 @@ test('connectOrBootstrap skips stale registrations from dead processes', async (
     .spyOn(registryModule, 'removeRegistration')
     .mockResolvedValue()
 
-  const openSocket = vi
-    .spyOn(socketModule, 'openSocket')
-    .mockResolvedValue({
-      socket: null,
-      buffer: '',
-      history: [],
-      waiters: [],
-      heartbeatTimer: null,
-      closed: false,
-      bootstrappedServer: null,
-      registration: freshRegistration,
-      onMessage: undefined,
-      onNotice: undefined,
-      closePromise: Promise.resolve(),
-      resolveClose: null,
-    } as ConnectionState)
+  const openSocket = vi.spyOn(socketModule, 'openSocket').mockResolvedValue({
+    socket: null,
+    buffer: '',
+    history: [],
+    waiters: [],
+    heartbeatTimer: null,
+    closed: false,
+    bootstrappedServer: null,
+    registration: freshRegistration,
+    onMessage: undefined,
+    onNotice: undefined,
+    closePromise: Promise.resolve(),
+    resolveClose: null,
+  } as ConnectionState)
   const sendMessage = vi
     .spyOn(socketModule, 'sendMessage')
     .mockImplementation(() => {})
@@ -122,22 +120,20 @@ test('connectOrBootstrap keeps registrations when pid probe returns EPERM', asyn
     .spyOn(registryModule, 'removeRegistration')
     .mockResolvedValue()
 
-  const openSocket = vi
-    .spyOn(socketModule, 'openSocket')
-    .mockResolvedValue({
-      socket: null,
-      buffer: '',
-      history: [],
-      waiters: [],
-      heartbeatTimer: null,
-      closed: false,
-      bootstrappedServer: null,
-      registration: existingRegistration,
-      onMessage: undefined,
-      onNotice: undefined,
-      closePromise: Promise.resolve(),
-      resolveClose: null,
-    } as ConnectionState)
+  const openSocket = vi.spyOn(socketModule, 'openSocket').mockResolvedValue({
+    socket: null,
+    buffer: '',
+    history: [],
+    waiters: [],
+    heartbeatTimer: null,
+    closed: false,
+    bootstrappedServer: null,
+    registration: existingRegistration,
+    onMessage: undefined,
+    onNotice: undefined,
+    closePromise: Promise.resolve(),
+    resolveClose: null,
+  } as ConnectionState)
   vi.spyOn(socketModule, 'sendMessage').mockImplementation(() => {})
   vi.spyOn(socketModule, 'waitForMessage').mockResolvedValue({
     type: 'hello-ack',
@@ -291,22 +287,20 @@ test('connectOrBootstrap does not remove registration preemptively for helper bo
   const removeRegistration = vi
     .spyOn(registryModule, 'removeRegistration')
     .mockResolvedValue()
-  const openSocket = vi
-    .spyOn(socketModule, 'openSocket')
-    .mockResolvedValue({
-      socket: null,
-      buffer: '',
-      history: [],
-      waiters: [],
-      heartbeatTimer: null,
-      closed: false,
-      bootstrappedServer: null,
-      registration: freshRegistration,
-      onMessage: undefined,
-      onNotice: undefined,
-      closePromise: Promise.resolve(),
-      resolveClose: null,
-    } as ConnectionState)
+  const openSocket = vi.spyOn(socketModule, 'openSocket').mockResolvedValue({
+    socket: null,
+    buffer: '',
+    history: [],
+    waiters: [],
+    heartbeatTimer: null,
+    closed: false,
+    bootstrappedServer: null,
+    registration: freshRegistration,
+    onMessage: undefined,
+    onNotice: undefined,
+    closePromise: Promise.resolve(),
+    resolveClose: null,
+  } as ConnectionState)
   vi.spyOn(socketModule, 'sendMessage').mockImplementation(() => {})
   vi.spyOn(socketModule, 'waitForMessage').mockResolvedValue({
     type: 'hello-ack',

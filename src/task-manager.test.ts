@@ -114,7 +114,11 @@ test('can update the requested cwd for an existing subscriber', () => {
   )
 
   expect(
-    manager.updateSubscriberRequestedCwd(first.taskId, first.subscriberId, '/work/b'),
+    manager.updateSubscriberRequestedCwd(
+      first.taskId,
+      first.subscriberId,
+      '/work/b',
+    ),
   ).toBe(true)
 
   expect(manager.listTasks()).toEqual([
