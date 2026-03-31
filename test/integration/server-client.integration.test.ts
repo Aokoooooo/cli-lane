@@ -1924,6 +1924,7 @@ test('queued merged task reassigns output preferences when the first subscriber 
         ).event.data,
       ),
     ).toEqual({
+      force: '1',
       term: 'xterm-256color',
     })
 

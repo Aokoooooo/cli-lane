@@ -10,7 +10,9 @@ test('cli prints help output', () => {
   )
 
   expect(result.exitCode).toBe(0)
-  expect(new TextDecoder().decode(result.stdout).trim()).toBe('cli-lane')
+  const output = new TextDecoder().decode(result.stdout).trim()
+  expect(output).toContain('cli-lane')
+  expect(output).toContain('Usage:')
 })
 
 test('cli fails on unsupported arguments', () => {
