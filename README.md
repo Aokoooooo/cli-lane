@@ -1,22 +1,33 @@
 # cli-lane
 
-`cli-lane` is a Bun-based CLI for local task coordination. It runs commands through a coordinator, supports queued execution, shared output for merged requests, and explicit detach semantics.
+`cli-lane` is a CLI for local task coordination. It runs commands through a coordinator, supports queued execution, shared output for merged requests, and explicit detach semantics.
 
-## Build
+## Installation
 
-Install dependencies first:
+No prerequisites required - the binary is automatically downloaded during installation.
 
-```bash
-bun install
-```
-
-Then build the single binary:
+### Via npm
 
 ```bash
-bun run build
+npm install -g cli-lane
 ```
 
-That produces a single binary at `./cli-lane`.
+### Via Bun
+
+```bash
+bun install -g cli-lane
+```
+
+### Via npx (no installation)
+
+```bash
+npx cli-lane run -- bun --version
+```
+
+## Supported Platforms
+
+- macOS (Intel & Apple Silicon)
+- Linux (x64 & arm64)
 
 ## Usage
 
@@ -79,8 +90,36 @@ If other subscribers are still attached, the task keeps running and you will see
 
 ## Development
 
+Requirements:
+- [Bun](https://bun.sh/) runtime (for development only)
+
 ```bash
+bun install
 bun test
 bun run build
-./cli-lane run -- bun --version
 ```
+
+### Building Release Binaries
+
+Build binaries for all supported platforms:
+
+```bash
+bun run build:all
+```
+
+This creates platform-specific binaries in the `release/` directory:
+- `cli-lane-darwin-x64`
+- `cli-lane-darwin-arm64`
+- `cli-lane-linux-x64`
+- `cli-lane-linux-arm64`
+
+These binaries should be uploaded to GitHub Releases for distribution.
+
+## Release Process
+
+1. Update version in `package.json`
+2. Build all binaries: `bun run build:all`
+3. Create a GitHub Release with the binaries attached
+4. Publish to npm: `npm publish --access public`
+
+The npm package will automatically download the correct binary during installation.
