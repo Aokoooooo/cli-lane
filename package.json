@@ -1,0 +1,68 @@
+{
+  "name": "cli-lane",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A CLI for local task coordination with queued execution and shared output",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "cli-lane": "./bin/cli-lane.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "cli",
+    "task",
+    "queue",
+    "runner",
+    "coordinator",
+    "bun"
+  ],
+  "author": "aoko",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aokoooooo/cli-lane.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Aokoooooo/cli-lane/issues"
+  },
+  "homepage": "https://github.com/Aokoooooo/cli-lane#readme",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "build": "bun build ./src/index.ts --outdir ./dist --target node",
+    "build:binary": "bun build --compile src/index.ts --outfile ./dist/cli-lane",
+    "build:all": "bun run scripts/build-all.ts",
+    "postinstall": "node scripts/postinstall.js",
+    "lint": "biome lint .",
+    "format": "biome check . --write",
+    "type-check": "tsc --noEmit",
+    "publish:check": "npm pack --dry-run",
+    "publish:public": "npm publish --access public"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
+    "@types/bun": "^1.3.11"
+  }
+}
