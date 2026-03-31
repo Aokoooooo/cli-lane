@@ -19,8 +19,24 @@ export async function runCli(args: string[], io: CliIO = {}): Promise<number> {
     return 0
   }
 
-  if (args.length === 0 || (args.length === 1 && args[0] === '--help')) {
-    stdout.write('cli-lane\n')
+  if (args.length === 0 || args[0] === '-h' || args[0] === '--help') {
+    stdout.write(`cli-lane
+
+Usage: cli-lane <command> [options]
+
+Commands:
+  run      Execute a command with queued task management
+  ps       List active tasks
+  cancel   Cancel a running task
+
+Options:
+  -h, --help  Show this help message
+
+Examples:
+  cli-lane run -- echo hello
+  cli-lane ps
+  cli-lane cancel <task-id>
+`)
     return 0
   }
 
