@@ -37,16 +37,32 @@ function getBinaryName() {
 const binaryName = getBinaryName()
 const binaryPath = join(__dirname, binaryName)
 
-if (!existsSync(binaryPath)) {
+const projectRoot = join(__dirname, '..')
+const srcDir = join(projectRoot, 'src')
+const isDevMode = existsSync(srcDir)
+
+let child
+
+if (isDevMode) {
+  child = spawn(
+    'bun',
+    ['run', join(srcDir, 'index.ts'), ...process.argv.slice(2)],
+    {
+      stdio: 'inherit',
+      detached: false,
+      cwd: projectRoot,
+    },
+  )
+} else if (existsSync(binaryPath)) {
+  child = spawn(binaryPath, process.argv.slice(2), {
+    stdio: 'inherit',
+    detached: false,
+  })
+} else {
   console.error(`Binary not found: ${binaryPath}`)
   console.error('Please try reinstalling the package: npm install -g cli-lane')
   process.exit(1)
 }
-
-const child = spawn(binaryPath, process.argv.slice(2), {
-  stdio: 'inherit',
-  detached: false,
-})
 
 child.on('exit', (code) => {
   process.exit(code ?? 0)
